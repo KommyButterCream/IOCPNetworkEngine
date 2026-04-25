@@ -3,10 +3,10 @@
 #include "ClientSession.h"
 #include "SessionNode.h"
 
-#include "../../CoreLib/Sync/SRWLockGuard.h"
-#include "../../CoreLib/Utils/Logger.h"
+#include "../Modules/Core/Sync/SRWLockGuard.h"
+#include "../Modules/Core/Util/Logger.h"
 
-using namespace CoreLibrary::Utils;
+using namespace Core::Util;
 
 ClientSessionPool::ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hybridSendPacketPool, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool)
 {
@@ -58,7 +58,7 @@ ClientSessionPool::~ClientSessionPool()
 
 ISession* ClientSessionPool::Acquire()
 {
-	CoreLibrary::Sync::SRWWriteLockGuard lockguard(m_lock);
+	Core::Sync::SRWWriteLockGuard lockguard(m_lock);
 
 	if (!m_freeList)
 	{
@@ -111,7 +111,7 @@ void ClientSessionPool::Release(ISession* session)
 	SessionNode* node = &m_nodes[sessionId];
 
 	{
-		CoreLibrary::Sync::SRWWriteLockGuard lockguard(m_lock);
+		Core::Sync::SRWWriteLockGuard lockguard(m_lock);
 		node->nextNode = m_freeList;
 		m_freeList = node;
 	}
@@ -124,7 +124,7 @@ uint32_t ClientSessionPool::GetSessionCount() const
 
 bool ClientSessionPool::IsSessionFull() const
 {
-	CoreLibrary::Sync::SRWReadLockGuard lockguard(m_lock);
+	Core::Sync::SRWReadLockGuard lockguard(m_lock);
 	return (m_freeList == nullptr);
 }
 

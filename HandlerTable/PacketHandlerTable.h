@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "../../Protocol/PacketID.h"
+#include "../Protocol/PacketID.h"
 #include "../Job/JobDefs.h"
 
 #ifdef BUILD_IOCP_ENGINE_DLL

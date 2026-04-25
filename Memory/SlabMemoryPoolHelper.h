@@ -2,7 +2,7 @@
 
 #include "SlabMemoryPool.h"
 
-#include "../../CoreLib/Utils/Logger.h"
+#include "../Modules/Core/Util/Logger.h"
 
 #include "../Job/Job.h"
 #include "../Protocol/PacketHeader.h"
@@ -13,7 +13,7 @@
 
 #include <stdio.h> // for printf_s
 
-using namespace CoreLibrary::Utils;
+using namespace Core::Util;
 
 namespace MEMORY_POOL
 {

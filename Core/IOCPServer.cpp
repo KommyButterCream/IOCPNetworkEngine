@@ -30,12 +30,12 @@
 #include "../Session/ClientSession.h"
 #include "../Session/AcceptSession.h"
 
-#include "../../CoreLib/Utils/Logger.h"
+#include "../Modules/Core/Util/Logger.h"
 
 #pragma comment(lib, "ws2_32.lib") // for WinSock2
 #pragma comment(lib, "mswsock.lib") // for AcceptEX / ConnectEx
 
-using namespace CoreLibrary::Utils;
+using namespace Core::Util;
 
 IOCPServer::IOCPServer()
 {

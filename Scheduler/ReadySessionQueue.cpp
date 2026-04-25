@@ -2,7 +2,7 @@
 
 #include <stdio.h> // for printf_s
 
-#include "../../Session/ISession.h"
+#include "../Session/ISession.h"
 
 ReadySessionQueue::ReadySessionQueue()
 {

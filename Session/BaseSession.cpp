@@ -2,9 +2,9 @@
 
 #include "SessionDefs.h"
 
-#include "../../CoreLib/Utils/Logger.h"
+#include "../Modules/Core/Util/Logger.h"
 
-using namespace CoreLibrary::Utils;
+using namespace Core::Util;
 
 BaseSession::BaseSession()
 {

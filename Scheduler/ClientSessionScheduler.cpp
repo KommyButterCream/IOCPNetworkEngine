@@ -1,9 +1,9 @@
 ﻿#include "ClientSessionScheduler.h"
 
 #include "../Job/Job.h"
-#include "../../Session/ClientSession.h"
-#include "../../Session/SessionJobQueue.h"
-#include "../../Memory/SlabMemoryPoolHelper.h"
+#include "../Session/ClientSession.h"
+#include "../Session/SessionJobQueue.h"
+#include "../Memory/SlabMemoryPoolHelper.h"
 
 #include <process.h> // for _beginthread, _endthread
 

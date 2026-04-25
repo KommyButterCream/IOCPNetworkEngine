@@ -11,7 +11,7 @@
 #include "../Buffer/SendPacketPool.h"
 #include "../Buffer/HybridSendPacketPool.h"
 #include "../Memory/SlabMemoryPoolHelper.h"
-#include "../../CoreLib/Utils/Logger.h"
+#include "../Modules/Core/Util/Logger.h"
 
 #include "../Scheduler/ClientSessionScheduler.h"
 #include "../Job/Job.h"
@@ -21,7 +21,7 @@
 
 #pragma comment(lib, "ws2_32.lib") // for WinSock2
 
-using namespace CoreLibrary::Utils;
+using namespace Core::Util;
 
 ClientSession::ClientSession()
 {

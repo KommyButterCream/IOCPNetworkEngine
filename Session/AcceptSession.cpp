@@ -2,9 +2,9 @@
 
 #include <WinSock2.h>
 
-#include "../../CoreLib/Utils/Logger.h"
+#include "../Modules/Core/Util/Logger.h"
 
-using namespace CoreLibrary::Utils;
+using namespace Core::Util;
 
 #pragma comment(lib, "ws2_32.lib")
 

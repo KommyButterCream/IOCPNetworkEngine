@@ -2,11 +2,11 @@
 
 #include <stdint.h>
 
-#include "../../CoreLib/ThreadBase.h"
+#include "../Modules/Core/Concurrency/ThreadBase.h"
 
 class SessionManager;
 
-class HeartbeatThread final : public CoreLibrary::Concurrency::ThreadBase
+class HeartbeatThread final : public Core::Concurrency::ThreadBase
 {
 public:
 	HeartbeatThread(SessionManager* sessionManager, uint64_t checkInterval_ms, uint64_t heartbeatTimeout_ms);

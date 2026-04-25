@@ -2,10 +2,10 @@
 
 #include <Windows.h>
 
-#include "../../CoreLib/Utils/Logger.h"
+#include "../Modules/Core/Util/Logger.h"
 #include "../Session/SessionManager.h"
 
-using namespace CoreLibrary::Utils;
+using namespace Core::Util;
 
 HeartbeatThread::HeartbeatThread(SessionManager* sessionManager, uint64_t checkInterval_ms, uint64_t heartbeatTimeout_ms)
 	: ThreadBase(L"HeartbeatThread")
