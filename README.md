@@ -43,6 +43,6 @@ Provides asynchronous server/client networking, session management, scheduling, 
 git clone --recurse-submodules https://github.com/KommyButterCream/IOCPNetworkEngine.git
 ```
 - If already cloned without submodules:
-- ```bash
+```bash
 git submodule update --init --recursive
 ```
