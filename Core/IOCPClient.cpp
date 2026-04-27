@@ -124,6 +124,7 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port)
 	m_handlerContext.jobMemoryPool = GetJobMemoryPool();
 	m_handlerContext.packetMemoryPool = GetPacketMemoryPool();
 	m_handlerContext.generalMemoryPool = GetGeneralMemoryPool();
+	m_handlerContext.serviceContext = GetServiceContext();
 
 	m_packetHandlerTable = new PacketHandlerTable(m_handlerContext);
 	if (!m_packetHandlerTable)
@@ -786,6 +787,11 @@ ClientSession* IOCPClient::GetClientSession() const
 	return m_session;
 }
 
+void* IOCPClient::GetServiceContext()
+{
+	return this;
+}
+
 bool IOCPClient::SendSystemAuthRequest(ClientSession* session)
 {
 	if (!session || !session->IsTransportConnected())
@@ -846,6 +852,7 @@ bool IOCPClient::HandleSystemPacket(ClientSession* session, uint16_t packetId, c
 
 		session->SetClientSessionState(ClientSessionState::ESTABLISHED);
 		Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d] session established", __FUNCTION__, session->GetSessionID());
+		OnSessionEstablished(session);
 		return true;
 	}
 

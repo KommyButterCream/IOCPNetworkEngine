@@ -112,10 +112,12 @@ public:
 	SlabMemoryPool* GetGeneralMemoryPool() const;
 	const HandlerContext& GetHandlerContext() const;
 	ClientSession* GetClientSession() const;
+	virtual void* GetServiceContext();
 
 
 protected:
 	virtual void OnClientConnect(ISession* session) {};
+	virtual void OnSessionEstablished(ISession* session) {};
 	virtual void OnClientDisconnect(ISession* session) {};
 	virtual void OnReceive(ISession* session, uint16_t packetId, const char* packetData, uint32_t packetSize) {};
 	virtual void OnSend(ISession* session, uint32_t bytesTransferred) {};
