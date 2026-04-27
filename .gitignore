@@ -9,3 +9,4 @@ obj/
 *.suo
 *.VC.db
 *.VC.opendb
+*.bak
