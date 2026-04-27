@@ -78,7 +78,7 @@
     <ClInclude Include="..\Session\SessionNode.h" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Modules\Core\Core\Core.vcxproj">
+    <ProjectReference Include="..\..\Core\Core\Core.vcxproj">
       <Project>{e3bd70c4-fc37-4703-9a54-152fd00bdea2}</Project>
     </ProjectReference>
   </ItemGroup>

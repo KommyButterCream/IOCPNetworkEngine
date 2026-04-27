@@ -1,13 +1,13 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
-VisualStudioVersion = 17.14.37203.1 d17.14
+VisualStudioVersion = 17.14.37203.1
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "IOCPNetworkEngine", "IOCPNetworkEngine\IOCPNetworkEngine.vcxproj", "{8BAEDDCB-B352-4813-A055-9AD3B9EE8653}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Modules", "Modules", "{C8D5274F-AC00-46C7-1F8D-E88E81087A52}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Core", "Modules\Core\Core\Core.vcxproj", "{E3BD70C4-FC37-4703-9A54-152FD00BDEA2}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Core", "..\Core\Core\Core.vcxproj", "{E3BD70C4-FC37-4703-9A54-152FD00BDEA2}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
