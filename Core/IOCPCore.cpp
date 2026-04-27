@@ -3,7 +3,7 @@
 #include <process.h> // for _beginthread, _endthread
 #include <stdio.h> // for printf_s
 
-#include "../Modules/Core/Util/Logger.h"
+#include "../../Core/Util/Logger.h"
 
 #pragma comment(lib, "ws2_32.lib") // for WinSock2
 

@@ -11,7 +11,7 @@
 #include "../Buffer/SendPacketPool.h"
 #include "../Buffer/HybridSendPacketPool.h"
 #include "../Memory/SlabMemoryPoolHelper.h"
-#include "../Modules/Core/Util/Logger.h"
+#include "../../Core/Util/Logger.h"
 
 #include "../Scheduler/ClientSessionScheduler.h"
 #include "../Job/Job.h"

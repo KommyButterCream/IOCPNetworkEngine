@@ -3,8 +3,8 @@
 #include "ClientSession.h"
 #include "SessionNode.h"
 
-#include "../Modules/Core/Sync/SRWLockGuard.h"
-#include "../Modules/Core/Util/Logger.h"
+#include "../../Core/Sync/SRWLockGuard.h"
+#include "../../Core/Util/Logger.h"
 
 using namespace Core::Util;
 

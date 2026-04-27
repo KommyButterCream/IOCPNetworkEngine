@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "../Modules/Core/Concurrency/ThreadBase.h"
+#include "../../Core/Concurrency/ThreadBase.h"
 
 class SessionManager;
 

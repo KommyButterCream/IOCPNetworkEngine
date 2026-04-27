@@ -2,7 +2,7 @@
 
 #include <Windows.h>
 
-#include "../Modules/Core/Util/Logger.h"
+#include "../../Core/Util/Logger.h"
 #include "../Session/SessionManager.h"
 
 using namespace Core::Util;

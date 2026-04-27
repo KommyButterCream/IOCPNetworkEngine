@@ -2,7 +2,7 @@
 
 #include "SessionDefs.h"
 
-#include "../Modules/Core/Util/Logger.h"
+#include "../../Core/Util/Logger.h"
 
 using namespace Core::Util;
 

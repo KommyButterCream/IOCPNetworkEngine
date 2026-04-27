@@ -4,7 +4,7 @@
 
 #include <WinSock2.h>
 
-#include "../Modules/Core/Sync/SRWLockGuard.h"
+#include "../../Core/Sync/SRWLockGuard.h"
 
 AcceptSessionPool::AcceptSessionPool(uint32_t capacity)
 {
