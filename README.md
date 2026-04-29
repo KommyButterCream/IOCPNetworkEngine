@@ -11,10 +11,10 @@ Provides asynchronous server/client networking, session management, scheduling, 
 - Session pool and lifecycle management
 - Scheduler-based session processing
 - Memory pool helpers for efficient allocation
-- Modular Core library integration via submodule
+- Modular integration with the shared Core library
 
 # Dependencies
-- [Core](./Modules/Core) as a submodule
+- [Core](../Core)
 - Windows WinSock2 / MSWSock
 - C++20
 - MSVC (Visual Studio 2022)
@@ -25,24 +25,29 @@ Provides asynchronous server/client networking, session management, scheduling, 
 - Windows 10/11 x64
 
 # Project Structure
+- `Buffer/` : send/receive packet buffers and packet pool helpers
 - `Core/` : IOCP-related core engine components
 - `Session/` : session classes and session pools
 - `Scheduler/` : ready/client session scheduling logic
 - `HandlerTable/` : packet handler table definitions
 - `Memory/` : memory pool helpers
-- `Modules/Core/` : external Core library submodule
+- `Network/` : socket options and overlapped I/O helpers
+- `Protocol/` : packet header, packet id, and system packet definitions
+- `Job/` : session job definitions
+
+# Repository Layout
+This project expects `IOCPNetworkEngine` and `Core` to be placed under the same parent directory.
+
+Example:
+```text
+Module/
++-- Core/
++-- IOCPNetworkEngine/
+```
+
+The Visual Studio solution references the shared Core project at `../Core/Core/Core.vcxproj`.
 
 # Notes
-- This repository uses `Modules/Core` as a submodule.
-- Make sure submodules are initialized before building.
-- The solution is configured for Windows-based development with Visual Studio 2022.
-
-# Clone
-- Clone with submodules:
-```bash
-git clone --recurse-submodules https://github.com/KommyButterCream/IOCPNetworkEngine.git
-```
-- If already cloned without submodules:
-```bash
-git submodule update --init --recursive
-```
+- The shared Core library is managed as a sibling repository/project.
+- Open `IOCPNetworkEngine.sln` with Visual Studio 2022.
+- Build the x64 configuration to produce the IOCPNetworkEngine DLL.
