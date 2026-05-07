@@ -70,6 +70,7 @@
     <ClInclude Include="..\Session\ClientSession.h" />
     <ClInclude Include="..\Session\ClientSessionPool.h" />
     <ClInclude Include="..\Session\ISession.h" />
+    <ClInclude Include="..\Session\ISessionContext.h" />
     <ClInclude Include="..\Session\ISessionEvent.h" />
     <ClInclude Include="..\Session\SessionContext.h" />
     <ClInclude Include="..\Session\SessionDefs.h" />
