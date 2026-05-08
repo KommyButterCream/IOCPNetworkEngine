@@ -9,6 +9,7 @@
 
 #include "../Network/OverlappedEx.h"
 #include "../Protocol/PacketID.h"
+#include "../Buffer/SendPacketPool.h"
 
 struct Job;
 struct SendPacketBuffer;
@@ -110,6 +111,7 @@ public:
 	bool EnqueueJob(Job* job, bool& wasEmpty);
 	bool SubmitJob(Job* job);
 	bool EnqueueSendPacket(void** packetData, uint32_t packetSize);
+	bool EnqueueSharedSendPacket(const void* packetData, uint32_t packetSize, SendPacketReleaseFunc releaseFunc, void* releaseContext);
 
 	void HandleSocketError(int errorCode, IO_OPERATION ioOperation);
 

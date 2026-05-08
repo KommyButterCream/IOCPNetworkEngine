@@ -8,15 +8,21 @@
 #include <stdint.h>
 #include "PreDefine.h"
 
+using SendPacketReleaseFunc = void (*)(const void* packetData, void* context);
+
 struct alignas(64) SendPacketBuffer : public SLIST_ENTRY
 {
 	const char* packetData = nullptr;    // 각 블록 버퍼 크기
 	uint32_t packetSize = 0;
+	SendPacketReleaseFunc releaseFunc = nullptr;
+	void* releaseContext = nullptr;
 
 	inline void Reset() noexcept
 	{
 		packetData = nullptr;
 		packetSize = 0;
+		releaseFunc = nullptr;
+		releaseContext = nullptr;
 	}
 };
 

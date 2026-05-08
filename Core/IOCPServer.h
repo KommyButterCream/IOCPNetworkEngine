@@ -121,6 +121,7 @@ protected:
 	SlabMemoryPool* GetPacketMemoryPool() const;
 	SlabMemoryPool* GetGeneralMemoryPool() const;
 	const HandlerContext& GetHandlerContext() const;
+	virtual void* GetServiceContext();
 
 protected:
 	virtual void OnClientConnect(ISession* session) = 0;

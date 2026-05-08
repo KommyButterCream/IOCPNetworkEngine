@@ -135,6 +135,7 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 	m_handlerContext.jobMemoryPool = GetJobMemoryPool();
 	m_handlerContext.packetMemoryPool = GetPacketMemoryPool();
 	m_handlerContext.generalMemoryPool = GetGeneralMemoryPool();
+	m_handlerContext.serviceContext = GetServiceContext();
 
 	m_packetHandlerTable = new PacketHandlerTable(m_handlerContext);
 	if (!m_packetHandlerTable)
@@ -1236,6 +1237,11 @@ SlabMemoryPool* IOCPServer::GetGeneralMemoryPool() const
 const HandlerContext& IOCPServer::GetHandlerContext() const
 {
 	return m_handlerContext;
+}
+
+void* IOCPServer::GetServiceContext()
+{
+	return this;
 }
 
 bool IOCPServer::SendSystemAuthResponse(ClientSession* session, SYSTEM_AUTH_RESULT authResult)

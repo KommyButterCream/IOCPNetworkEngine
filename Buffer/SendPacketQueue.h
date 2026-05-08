@@ -7,9 +7,8 @@
 #include <Windows.h>
 #include <stdint.h>
 #include "PreDefine.h"
+#include "SendPacketPool.h"
 
-struct SendPacketBuffer;
-class SendPacketPool;
 class SlabMemoryPool;
 
 class SendPacketQueue
@@ -22,6 +21,7 @@ public:
 	void Finalize();
 
 	bool Enqueue(void** packetData, uint32_t packetSize);
+	bool EnqueueShared(const void* packetData, uint32_t packetSize, SendPacketReleaseFunc releaseFunc, void* releaseContext);
 	bool Dequeue(SendPacketBuffer*& outBlock);
 
 	void Reset();

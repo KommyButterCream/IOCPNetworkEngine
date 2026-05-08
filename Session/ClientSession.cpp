@@ -23,6 +23,26 @@
 
 using namespace Core::Util;
 
+namespace
+{
+	void ReleaseSendPacketData(SlabMemoryPool& packetMemoryPool, SlabMemoryPool& generalMemoryPool, SendPacketBuffer* packetBuffer)
+	{
+		if (!packetBuffer || !packetBuffer->packetData)
+			return;
+
+		if (packetBuffer->releaseFunc)
+		{
+			packetBuffer->releaseFunc(packetBuffer->packetData, packetBuffer->releaseContext);
+		}
+		else
+		{
+			MEMORY_POOL::ReleasePacket(packetMemoryPool, generalMemoryPool, packetBuffer->packetData);
+		}
+
+		packetBuffer->Reset();
+	}
+}
+
 ClientSession::ClientSession()
 {
 	::ZeroMemory(&m_connectOverlapped, sizeof(OverlappedEx));
@@ -504,7 +524,7 @@ bool ClientSession::PostCurrentSend()
 	if (remainingBytes == 0)
 	{
 		// PacketData 반환
-		MEMORY_POOL::ReleasePacket(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket->packetData);
+		ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket);
 
 		m_sendPacketPool->Release(m_currentSendPacket);
 		m_currentSendPacket = nullptr;
@@ -572,7 +592,7 @@ bool ClientSession::OnSendCompleted(const DWORD bytesTransferred)
 
 	// 완전 전송 완료
 	// PacketData 반환
-	MEMORY_POOL::ReleasePacket(*m_packetMemoryPool, *m_generalMemoryPool, currentPacket->packetData);
+	ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, currentPacket);
 
 	m_sendPacketPool->Release(currentPacket);
 	m_currentSendPacket = nullptr;
@@ -673,6 +693,41 @@ bool ClientSession::EnqueueSendPacket(void** packetData, uint32_t packetSize)
 	return false;
 }
 
+bool ClientSession::EnqueueSharedSendPacket(const void* packetData, uint32_t packetSize, SendPacketReleaseFunc releaseFunc, void* releaseContext)
+{
+	if (!packetData || packetSize == 0 || !releaseFunc || GetSendPacketQueue() == nullptr)
+		return false;
+
+	const PACKET_HEADER* packetHeader = reinterpret_cast<const PACKET_HEADER*>(packetData);
+	if (packetHeader == nullptr || packetSize < sizeof(PACKET_HEADER))
+	{
+		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] invalid packet header", __FUNCTION__, GetSessionID());
+		return false;
+	}
+
+	if (packetHeader->packetSize != packetSize)
+	{
+		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] packet size mismatch (header=%u, arg=%u)", __FUNCTION__, GetSessionID(), packetHeader->packetSize, packetSize);
+		return false;
+	}
+
+	if (!CanSendPacket(packetHeader->packetId))
+	{
+		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] packet send blocked before session established (PacketID : %u)", __FUNCTION__, GetSessionID(), packetHeader->packetId);
+		return false;
+	}
+
+	if (!GetSendPacketQueue()->EnqueueShared(packetData, packetSize, releaseFunc, releaseContext))
+	{
+		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] failed to enqueue shared SendPacket", __FUNCTION__, GetSessionID());
+		return false;
+	}
+
+	TrySendNext();
+
+	return true;
+}
+
 void ClientSession::HandleSocketError(int errorCode, IO_OPERATION ioOperation)
 {
 	Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d][IO : %d] 에러 핸들링", __FUNCTION__, GetSessionID(), (int)ioOperation);
@@ -693,7 +748,7 @@ void ClientSession::HandleSocketError(int errorCode, IO_OPERATION ioOperation)
 		// nullptr 초기화 한다.
 		if (m_currentSendPacket)
 		{
-			MEMORY_POOL::ReleasePacket(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket->packetData);
+			ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket);
 			m_sendPacketPool->Release(m_currentSendPacket);
 			m_currentSendPacket = nullptr;
 		}

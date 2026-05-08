@@ -7,6 +7,26 @@
 
 #include "../Memory/SlabMemoryPoolHelper.h"
 
+namespace
+{
+	void ReleaseQueuedPacket(SlabMemoryPool& packetMemoryPool, SlabMemoryPool& generalMemoryPool, SendPacketBuffer* packetBuffer)
+	{
+		if (!packetBuffer || !packetBuffer->packetData)
+			return;
+
+		if (packetBuffer->releaseFunc)
+		{
+			packetBuffer->releaseFunc(packetBuffer->packetData, packetBuffer->releaseContext);
+		}
+		else
+		{
+			MEMORY_POOL::ReleasePacket(packetMemoryPool, generalMemoryPool, packetBuffer->packetData);
+		}
+
+		packetBuffer->Reset();
+	}
+}
+
 SendPacketQueue::SendPacketQueue()
 {
 }
@@ -98,6 +118,47 @@ bool SendPacketQueue::Enqueue(void** packetData, uint32_t packetSize)
 	*packetData = nullptr;
 
 	block->packetSize = packetSize;
+	block->releaseFunc = nullptr;
+	block->releaseContext = nullptr;
+
+	m_queue[m_tail] = block;
+	m_tail = (m_tail + 1) & (SEND_PACKET_QUEUE_SIZE - 1);
+	++m_count;
+
+	::ReleaseSRWLockExclusive(&m_srwLock);
+
+	return true;
+}
+
+bool SendPacketQueue::EnqueueShared(const void* packetData, uint32_t packetSize, SendPacketReleaseFunc releaseFunc, void* releaseContext)
+{
+	if (!m_queue || !m_packetPool || !m_packetMemoryPool || !m_generalMemoryPool)
+		return false;
+
+	if (!packetData || packetSize == 0 || packetSize > MEMORY_SIZE_32K || !releaseFunc)
+		return false;
+
+	::AcquireSRWLockExclusive(&m_srwLock);
+
+	if (m_count >= SEND_PACKET_QUEUE_SIZE)
+	{
+		::ReleaseSRWLockExclusive(&m_srwLock);
+
+		return false;
+	}
+
+	SendPacketBuffer* block = m_packetPool->Acquire();
+	if (!block)
+	{
+		::ReleaseSRWLockExclusive(&m_srwLock);
+
+		return false;
+	}
+
+	block->packetData = static_cast<const char*>(packetData);
+	block->packetSize = packetSize;
+	block->releaseFunc = releaseFunc;
+	block->releaseContext = releaseContext;
 
 	m_queue[m_tail] = block;
 	m_tail = (m_tail + 1) & (SEND_PACKET_QUEUE_SIZE - 1);
@@ -146,7 +207,7 @@ void SendPacketQueue::Reset()
 	{
 		if (m_queue[i])
 		{
-			MEMORY_POOL::ReleasePacket(*m_packetMemoryPool, *m_generalMemoryPool, m_queue[i]->packetData);
+			ReleaseQueuedPacket(*m_packetMemoryPool, *m_generalMemoryPool, m_queue[i]);
 
 			m_packetPool->Release(m_queue[i]);
 			m_queue[i] = nullptr;
