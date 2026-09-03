@@ -100,13 +100,15 @@ void IOCPCore::FinalizeWinsock()
 
 bool IOCPCore::InitializeIOCPHandle()
 {
-	m_iocpHandle = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-	if (m_iocpHandle == INVALID_HANDLE_VALUE)
+	HANDLE iocpHandle = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+	if (iocpHandle == nullptr)
 	{
 		//Log::log(LogLevel::LOG_ERROR, "[%s] CreateIoCompletionPort failed - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
 
 		return false;
 	}
+
+	m_iocpHandle = iocpHandle;
 
 	//Log::log(LogLevel::LOG_INFO, "[%s] CreateIoCompletionPort success\n", __FUNCTION__);
 
