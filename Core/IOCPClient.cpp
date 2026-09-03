@@ -173,10 +173,22 @@ void IOCPClient::StopClient()
 		m_clientSessionScheduler = nullptr;
 	}
 
+	// [1] I/O 취소 요청 및 취소 완료 대기.
+	//     이 대기는 IOCP 워커 스레드가 DecrementIO 에서 이벤트를 Set 해주어야 풀리므로
+	//     반드시 IOCPCore::Stop() 보다 먼저 수행되어야 한다.
 	if (m_session)
 	{
 		OnDisconnectRequest(m_session);
+	}
 
+	// [2] IOCP 정지. GQCS 워커 스레드를 조인한다.
+	//     이 시점 이후로는 완료 통지가 발생하지 않으므로
+	//     아래의 세션 및 메모리풀 해제가 안전해진다.
+	IOCPCore::Stop();
+
+	// [3] 세션 해제
+	if (m_session)
+	{
 		delete m_session;
 		m_session = nullptr;
 	}
@@ -216,8 +228,6 @@ void IOCPClient::StopClient()
 	m_serverPort = 0;
 
 	FinalizeGUIDConnectEx();
-
-	IOCPCore::Stop();
 }
 
 void IOCPClient::HandleCompletion(ULONG_PTR completionKey, LPOVERLAPPED overlapped, DWORD bytesTransferred, BOOL completionStatus)
