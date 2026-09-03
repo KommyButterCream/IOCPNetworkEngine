@@ -43,7 +43,7 @@ bool SocketOption::SetNoDelay(SOCKET socket)
 // KeepAlive
 bool SocketOption::SetKeepAlive(SOCKET socket)
 {
-	// ���� ���� 2�ð� �� ���� ������ ����ִ��� ù ������ �ϰ� 1�� �������� ��õ� �Ѵ�.
+	// 최초 연결 2시간 후 상대가 살아있는지 첫 검사를 하고, 이후 1초 간격으로 재시도 한다.
 	BOOL option = TRUE;
 
 	int result = ::setsockopt(socket, SOL_SOCKET, SO_KEEPALIVE, (const char*)&option, sizeof(option));

@@ -100,6 +100,6 @@ SendPacketPool* HybridSendPacketPool::GetPool(const uint32_t sessionId)
 	if (!m_hybridPools || m_totalBlockCount == 0 || m_hybridPoolCount == 0)
 		return nullptr;
 
-	// SessionID �� ���� SendPacketPool �� �ο��Ѵ�.
+	// SessionID 에 따라 사용할 SendPacketPool 을 부여한다.
 	return m_hybridPools[sessionId % m_hybridPoolCount];
 }

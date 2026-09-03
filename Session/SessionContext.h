@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #ifndef IOCP_ENGINE_API
 #ifdef BUILD_IOCP_ENGINE_DLL

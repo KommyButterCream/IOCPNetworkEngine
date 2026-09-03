@@ -19,7 +19,7 @@ struct Job;
 class SlabMemoryPool;
 enum class SESSION_ROLE;
 
-// ���ǳ� JobQueue (singly-linked list) - SRWLock ���� ��ȣ
+// 세션별 JobQueue (singly-linked list) - SRWLock 으로 보호
 class IOCP_ENGINE_API SessionJobQueue
 {
 public:
