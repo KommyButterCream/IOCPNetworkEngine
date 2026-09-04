@@ -103,7 +103,24 @@ void ClientSession::ResetSession()
 	{
 		m_sendPacketQueue->Reset();
 	}
-	m_currentSendPacket = nullptr;
+
+	// 전송 중이던 패킷을 반환한다.
+	// 포인터만 버리면 패킷 메모리와 SendPacketBuffer 가 함께 누수된다.
+	// (RST 등으로 전송 도중에 세션이 정리되는 경로에서 실제로 발생한다)
+	if (m_currentSendPacket)
+	{
+		if (m_packetMemoryPool && m_generalMemoryPool)
+		{
+			ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket);
+		}
+
+		if (m_sendPacketPool)
+		{
+			m_sendPacketPool->Release(m_currentSendPacket);
+		}
+
+		m_currentSendPacket = nullptr;
+	}
 	m_sendOffset = 0;
 
 	if (m_jobQueue)
@@ -156,7 +173,22 @@ void ClientSession::Finalize()
 		m_sendPacketQueue = nullptr;
 	}
 
-	m_currentSendPacket = nullptr;
+	// 전송 중이던 패킷을 반환한다. (ResetSession 과 같은 이유)
+	// 풀 포인터들은 이 함수 끝에서 nullptr 로 바뀌므로 그 전에 반환해야 한다.
+	if (m_currentSendPacket)
+	{
+		if (m_packetMemoryPool && m_generalMemoryPool)
+		{
+			ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket);
+		}
+
+		if (m_sendPacketPool)
+		{
+			m_sendPacketPool->Release(m_currentSendPacket);
+		}
+
+		m_currentSendPacket = nullptr;
+	}
 	m_sendOffset = 0;
 
 	if (m_jobQueue)
