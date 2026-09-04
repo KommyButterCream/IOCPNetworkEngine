@@ -150,17 +150,13 @@ void IOCPCore::FinalizeWinsock()
 {
 	if (m_winsockInitialized)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s] IOCP WinSocket Cleanup", __FUNCTION__);
-
 		// WS2_32.dll 사용 해제를 위해 호출
 		if (::WSACleanup() == SOCKET_ERROR)
 		{
-			//Log::log(LogLevel::LOG_ERROR, "[%s] WSACleanup Failed - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
+			LOGE("WSACleanup failed (error %d)", ::WSAGetLastError());
 		}
 
 		m_winsockInitialized = false;
-
-		//Log::log(LogLevel::LOG_INFO, "[%s] WSACleanup success\n", __FUNCTION__);
 	}
 }
 
@@ -169,14 +165,15 @@ bool IOCPCore::InitializeIOCPHandle()
 	HANDLE iocpHandle = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
 	if (iocpHandle == nullptr)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] CreateIoCompletionPort failed - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
-
+		// CreateIoCompletionPort 는 실패 시 NULL 을 반환한다. INVALID_HANDLE_VALUE 가 아니다.
+		LOGE("CreateIoCompletionPort failed (error %lu)", ::GetLastError());
 		return false;
 	}
 
+	// 결과를 지역 변수로 먼저 받는 이유는, 실패한 경우 m_iocpHandle 이
+	// INVALID_HANDLE_VALUE 센티널을 그대로 유지하도록 하기 위함이다.
+	// (FinalizeIOCPHandle, RequestIOCPThreadTerminate 가 이 센티널을 전제로 동작한다)
 	m_iocpHandle = iocpHandle;
-
-	//Log::log(LogLevel::LOG_INFO, "[%s] CreateIoCompletionPort success\n", __FUNCTION__);
 
 	return true;
 }
@@ -185,9 +182,11 @@ void IOCPCore::FinalizeIOCPHandle()
 {
 	if (m_iocpHandle != INVALID_HANDLE_VALUE)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s] IOCP Handle Close", __FUNCTION__);
+		if (!::CloseHandle(m_iocpHandle))
+		{
+			LOGE("failed to close the IOCP handle (error %lu)", ::GetLastError());
+		}
 
-		::CloseHandle(m_iocpHandle);
 		m_iocpHandle = INVALID_HANDLE_VALUE;
 	}
 }
@@ -202,12 +201,14 @@ void IOCPCore::CloseSocketHandle(SOCKET socket)
 	{
 		if (::closesocket(socket) == SOCKET_ERROR)
 		{
-			const int nError = ::WSAGetLastError();
-
-			Logger::Log(LogLevel::LOG_ERROR, "[%s][socketID : %d] closesocket 실패(ERROR CODE : %d)", __FUNCTION__, static_cast<int>(socket), nError);
+			LOGE("closesocket failed for socket %d (error %d)",
+				static_cast<int>(socket), ::WSAGetLastError());
 		}
-
-		Logger::Log(LogLevel::LOG_INFO, "[%s][socketID : %d] closesocket 완료", __FUNCTION__, static_cast<int>(socket));
+		else
+		{
+			// 접속 1건당 최소 1회 호출되므로 추적 레벨로 둔다.
+			LOGT("socket %d closed", static_cast<int>(socket));
+		}
 	}
 }
 
@@ -375,9 +376,10 @@ bool IOCPCore::RegisterSocketToIOCP(ULONG_PTR completionKey, SOCKET socket)
 		completionKey,
 		0) == NULL)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s][socket : %d] IOCP Register Fail! (ERROR CODE : %d)", __FUNCTION__, (int)socket, ::GetLastError());
-
-		//Log::Error("Failed to associate socket with IOCP");
+		// 등록 실패한 소켓은 완료 통지를 받지 못하므로 그 세션은 쓸 수 없다.
+		// INFO 가 아니라 ERROR 가 맞다.
+		LOGE("failed to associate socket %d with the IOCP (error %lu)",
+			static_cast<int>(socket), ::GetLastError());
 		return false;
 	}
 

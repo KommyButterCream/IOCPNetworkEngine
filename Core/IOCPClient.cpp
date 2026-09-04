@@ -260,14 +260,14 @@ void IOCPClient::HandleCompletion(ULONG_PTR completionKey, LPOVERLAPPED overlapp
 		HandleSend(overlappedEx, session, bytesTransferred);
 		break;
 	default:
-		//Log::log(LogLevel::LOG_ERROR, "[%s] Unknown operation - ErrorCode: %d\n", __FUNCTION__, WSAGetLastError());
+		//Log::log(LogLevel::LOG_ERROR, "[%s] Unknown operation - ErrorCode: %d", WSAGetLastError());
 		break;
 	}
 }
 
 void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ISession* session, int errorCode, IO_OPERATION ioOperation)
 {
-	Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d][IO : %d] 에러 핸들링", __FUNCTION__, session->GetSessionID(), (int)ioOperation);
+	LOGW("session %u socket error %d on io %d", session->GetSessionID(), errorCode, (int)ioOperation);
 
 	// 공용으로 처리 되어야 하는 예외 처리
 
@@ -371,7 +371,7 @@ void IOCPClient::HandleConnect(uint32_t sessionId, DWORD bytesTransferred)
 
 	if (!SendSystemAuthRequest(m_session))
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] system auth request send failed", __FUNCTION__, m_session->GetSessionID());
+		LOGE("session %u system auth request send failed", m_session->GetSessionID());
 		OnDisconnectRequest(m_session);
 		return;
 	}
@@ -381,13 +381,13 @@ void IOCPClient::HandleConnect(uint32_t sessionId, DWORD bytesTransferred)
 
 void IOCPClient::HandleConnectCancelled(OverlappedEx* overlappedEx, ISession* session)
 {
-	Logger::Log(LogLevel::LOG_WARNING, "[%s] ConnectEx IO Canceled", __FUNCTION__);
+	LOGW("ConnectEx was cancelled");
 
 	ClientSession* clientSession = dynamic_cast<ClientSession*>(session);
 
 	if (!clientSession)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] Client Session is nullptr", __FUNCTION__);
+		LOGE("client session cast failed : the session is not a ClientSession");
 
 		return;
 	}
@@ -465,7 +465,7 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 			if (!HandleSystemPacket(clientSession, packetId, packetDataByMemoryPool, packetSize))
 			{
 				MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
-				Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] engine packet handling failed (PacketID : %u)", __FUNCTION__, clientSession->GetSessionID(), packetId);
+				LOGE("session %u engine packet handling failed (PacketID : %u)", clientSession->GetSessionID(), packetId);
 				OnDisconnectRequest(clientSession);
 				return;
 			}
@@ -477,7 +477,7 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 		if (!clientSession->IsEstablished())
 		{
 			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
-			Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] service packet received before session established (PacketID : %u)", __FUNCTION__, clientSession->GetSessionID(), packetId);
+			LOGW("session %u service packet received before session established (PacketID : %u)", clientSession->GetSessionID(), packetId);
 			OnDisconnectRequest(clientSession);
 			return;
 		}
@@ -521,7 +521,7 @@ void IOCPClient::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD
 
 	if (clientSession->GetSessionRole() != SESSION_ROLE::CLIENT)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] CLIENT Session 이 아닌 세션 ID\n", __FUNCTION__);
+		LOGE("send completion arrived for a session whose role is not CLIENT");
 
 		__debugbreak();
 		return;
@@ -577,11 +577,11 @@ bool IOCPClient::CreateConnectSocket()
 
 	if (m_clientSocket == INVALID_SOCKET)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] WSASocket Connect socket failed\n", __FUNCTION__);
+		//Log::log(LogLevel::LOG_ERROR, "[%s] WSASocket Connect socket failed");
 		return false;
 	}
 
-	//Log::log(LogLevel::LOG_INFO, "[%s] WSASocket Connect socket success\n", __FUNCTION__);
+	//Log::log(LogLevel::LOG_INFO, "[%s] WSASocket Connect socket success");
 
 	return true;
 }
@@ -600,12 +600,12 @@ bool IOCPClient::BindClientSocket(SOCKET clientSocket)
 
 	if (::bind(clientSocket, (SOCKADDR*)&localAddr, sizeof(localAddr)) == SOCKET_ERROR)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] bind failed - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
+		//Log::log(LogLevel::LOG_ERROR, "[%s] bind failed - ErroCode : %d", WSAGetLastError());
 
 		return false;
 	}
 
-	//Log::log(LogLevel::LOG_INFO, "[%s] bind success\n", __FUNCTION__);
+	//Log::log(LogLevel::LOG_INFO, "[%s] bind success");
 
 	return true;
 }
@@ -629,7 +629,7 @@ bool IOCPClient::InitializeGUIDConnectEx(SOCKET clientSocket)
 		nullptr,
 		nullptr) == SOCKET_ERROR)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] WSAIoctl Get ConnectEx Pointer Failed - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
+		//Log::log(LogLevel::LOG_ERROR, "[%s] WSAIoctl Get ConnectEx Pointer Failed - ErroCode : %d", WSAGetLastError());
 
 		return false;
 	}
@@ -646,21 +646,21 @@ bool IOCPClient::PrepareConnect()
 {
 	if (!m_session)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to acquire session\n", __FUNCTION__);
+		//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to acquire session");
 		__debugbreak();
 		return false;
 	}
 
 	if (m_session->GetClientSessionState() != ClientSessionState::CONNECT_READY)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] Session is not Ready\n", __FUNCTION__);
+		//Log::log(LogLevel::LOG_ERROR, "[%s] Session is not Ready");
 		__debugbreak();
 		return false;
 	}
 
 	if (!PostConnect(m_session))
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post ConnectEx\n", __FUNCTION__);
+		//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post ConnectEx");
 		return false;
 	}
 
@@ -673,7 +673,7 @@ bool IOCPClient::PostConnect(ISession* session)
 
 	if (!clientSession)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] ConnectEx 시작하려고 세션을 캐스팅 했는데 nullptr", __FUNCTION__);
+		LOGE("client session cast failed : the session is not a ClientSession");
 
 		return false;
 	}
@@ -747,7 +747,7 @@ void IOCPClient::OnDisconnectRequest(ISession* session)
 
 	if (!clientSession)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] Client Session is nullptr", __FUNCTION__);
+		LOGE("client session cast failed : the session is not a ClientSession");
 
 		return;
 	}
@@ -861,18 +861,18 @@ bool IOCPClient::HandleSystemPacket(ClientSession* session, uint16_t packetId, c
 
 		if (response->protocolVersion != IOCP_ENGINE_PROTOCOL_VERSION)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] protocol version mismatch (server=%u, client=%u)", __FUNCTION__, session->GetSessionID(), response->protocolVersion, IOCP_ENGINE_PROTOCOL_VERSION);
+			LOGE("session %u protocol version mismatch (server=%u, client=%u)", session->GetSessionID(), response->protocolVersion, IOCP_ENGINE_PROTOCOL_VERSION);
 			return false;
 		}
 
 		if (authResult != SYSTEM_AUTH_RESULT::SUCCESS)
 		{
-			Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] auth rejected by server (result=%u)", __FUNCTION__, session->GetSessionID(), response->authResult);
+			LOGW("session %u auth rejected by server (result=%u)", session->GetSessionID(), response->authResult);
 			return false;
 		}
 
 		session->SetClientSessionState(ClientSessionState::ESTABLISHED);
-		Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d] session established", __FUNCTION__, session->GetSessionID());
+		LOGI("session %u session established", session->GetSessionID());
 		OnSessionEstablished(session);
 		return true;
 	}
@@ -894,7 +894,7 @@ bool IOCPClient::HandleSystemPacket(ClientSession* session, uint16_t packetId, c
 	}
 
 	default:
-		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] unhandled system packet id: %u", __FUNCTION__, session->GetSessionID(), packetId);
+		LOGW("session %u unhandled system packet id: %u", session->GetSessionID(), packetId);
 		return false;
 	}
 }

@@ -157,12 +157,17 @@ void BaseSession::DecrementIO()
 
 	if (ioCount < 0)
 	{
+		// 카운터가 음수로 내려갔다.
+		// ResetSession / Finalize 가 카운터를 강제로 0 으로 만드는 동안
+		// 다른 스레드의 완료 처리가 아직 돌고 있었다는 뜻이다.
+		LOGE("session %u IO count went negative (%ld). the counter was reset while a handler was still running",
+			GetSessionID(), ioCount);
 		__debugbreak();
 	}
 
 	if (::InterlockedCompareExchange(&m_cancelIo, 0, 0) == 1 && ioCount == 0 && m_ioCancelCompleteEvent)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s][BaseSession : %d] all pending IO cancelled", __FUNCTION__, GetSessionID());
+		LOGI("session %u all pending IO cancelled", GetSessionID());
 		::SetEvent(m_ioCancelCompleteEvent);
 	}
 }
@@ -173,7 +178,8 @@ bool BaseSession::CancelPendingIO()
 	{
 		if (::InterlockedExchange(&m_cancelIo, 1) == 0)
 		{
-			Logger::Log(LogLevel::LOG_INFO, "[%s][BaseSession : %d] CancelIoEx begin", __FUNCTION__, GetSessionID());
+			LOGI("session %u cancelling pending IO (count %ld)",
+				GetSessionID(), ::InterlockedCompareExchange(&m_ioCount, 0, 0));
 
 			if (!::CancelIoEx(reinterpret_cast<HANDLE>(m_clientSocket), nullptr))
 			{
@@ -186,16 +192,21 @@ bool BaseSession::CancelPendingIO()
 						::SetEvent(m_ioCancelCompleteEvent);
 					}
 
-					Logger::Log(LogLevel::LOG_INFO, "[%s][BaseSession : %d] CancelIoEx no pending IO", __FUNCTION__, GetSessionID());
+					// 주의: 여기서 IO 카운트를 확인하지 않고 완료 이벤트를 세운다.
+					// CancelIoEx 가 대상을 못 찾았을 뿐 실제로는 완료 대기 중인
+					// I/O 가 남아 있을 수 있으므로 카운트도 같이 남긴다.
+					LOGI("session %u CancelIoEx found no pending IO (error %lu, io count %ld)",
+						GetSessionID(), errorCode, ::InterlockedCompareExchange(&m_ioCount, 0, 0));
 					return true;
 				}
 				else if (errorCode == ERROR_OPERATION_ABORTED)
 				{
-					Logger::Log(LogLevel::LOG_INFO, "[%s][BaseSession : %d] CancelIoEx returned aborted", __FUNCTION__, GetSessionID());
+					LOGW("session %u CancelIoEx returned ERROR_OPERATION_ABORTED", GetSessionID());
 					return false;
 				}
 				else
 				{
+					LOGE("session %u CancelIoEx failed (error %lu)", GetSessionID(), errorCode);
 					return false;
 				}
 			}
@@ -214,13 +225,19 @@ bool BaseSession::WaitForIOCancelComplete(const uint32_t timeout_ms)
 		switch (waitResult)
 		{
 		case WAIT_OBJECT_0:
-			Logger::Log(LogLevel::LOG_INFO, "[%s][BaseSession : %d] IO cancel completed", __FUNCTION__, GetSessionID());
+			LOGI("session %u IO cancel completed", GetSessionID());
 			return true;
+
 		case WAIT_TIMEOUT:
-			Logger::Log(LogLevel::LOG_INFO, "[%s][BaseSession : %d] IO cancel timeout", __FUNCTION__, GetSessionID());
+			// 호출부는 이 실패를 무시하고 세션 해제로 진행하므로
+			// 남아 있는 IO 수까지 남겨야 원인 추적이 가능하다.
+			LOGE("session %u IO cancel timed out after %u ms (io count still %ld)",
+				GetSessionID(), timeout_ms, ::InterlockedCompareExchange(&m_ioCount, 0, 0));
 			return false;
+
 		default:
-			Logger::Log(LogLevel::LOG_INFO, "[%s][BaseSession : %d] unhandled wait result", __FUNCTION__, GetSessionID());
+			LOGE("session %u IO cancel wait returned %lu (error %lu)",
+				GetSessionID(), waitResult, ::GetLastError());
 			return false;
 		}
 	}
@@ -234,7 +251,9 @@ bool BaseSession::OnDisconnect()
 	{
 		if (m_clientSocket != INVALID_SOCKET)
 		{
-			Logger::Log(LogLevel::LOG_WARNING, "[%s][BaseSession : %d] socket was not detached before disconnect (%d)", __FUNCTION__, GetSessionID(), static_cast<int>(m_clientSocket));
+			// 소켓은 반드시 DetachSocket 으로 먼저 떼어낸 뒤 여기 와야 한다.
+			LOGE("session %u disconnecting with a live socket %d. it was not detached",
+				GetSessionID(), static_cast<int>(m_clientSocket));
 			__debugbreak();
 		}
 
@@ -253,7 +272,7 @@ bool BaseSession::OnDisconnect()
 			break;
 		}
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s][BaseSession : %d] disconnected", __FUNCTION__, GetSessionID());
+		LOGI("session %u disconnected (role %d)", GetSessionID(), static_cast<int>(m_sessionRole));
 	}
 
 	return true;

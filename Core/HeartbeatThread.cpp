@@ -49,16 +49,18 @@ void HeartbeatThread::Run()
 			continue;
 		}
 
+		// 이전 코드는 heartbeatRequestCount 대신 m_heartbeatTimeout_ms 를 찍고 있었다.
+		// (uint64_t 를 %u 로 넘겨서 가변인자 UB 이기도 했다)
 		const uint32_t heartbeatRequestCount = m_sessionManager->SendHeartbeatRequests();
-		if (m_heartbeatTimeout_ms > 0)
+		if (heartbeatRequestCount > 0)
 		{
-			Logger::Log(LogLevel::LOG_INFO, "[%s] sent heartbeat requests: %u", __FUNCTION__, m_heartbeatTimeout_ms);
+			LOGI("sent %u heartbeat requests", heartbeatRequestCount);
 		}
 
 		const uint32_t disconnectedCount = m_sessionManager->DisconnectZombieSessions(m_heartbeatTimeout_ms);
 		if (disconnectedCount > 0)
 		{
-			Logger::Log(LogLevel::LOG_WARNING, "[%s] disconnected zombie sessions: %u", __FUNCTION__, disconnectedCount);
+			LOGW("disconnected %u zombie sessions (timeout %llu ms)", disconnectedCount, m_heartbeatTimeout_ms);
 		}
 	}
 }

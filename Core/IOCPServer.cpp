@@ -185,7 +185,7 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 
 void IOCPServer::StopServer()
 {
-	Logger::Log(LogLevel::LOG_INFO, "[%s] Server Shutdown!", __FUNCTION__);
+	LOGI("server shutdown requested");
 
 	// 서버가 닫히기 전에 AcceptIO 가 취소되기 전에 그 찰나에 받아진
 	// Accept IO 에 대한 예외 처리를 위해 플래그 추가.
@@ -200,28 +200,28 @@ void IOCPServer::StopServer()
 
 	if (m_sessionManager)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s] 모든 AcceptEx IO 취소 요청", __FUNCTION__);
+		LOGI("shutdown 1/6 : cancelling all AcceptEx IO");
 		m_sessionManager->RequestAllAcceptIOCancel();
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s] 모든 AcceptEx IO 취소 처리 대기 중...", __FUNCTION__);
+		LOGI("shutdown 2/6 : waiting for AcceptEx cancellation");
 		m_sessionManager->WaitForAllAcceptIOCancelComplete(10'000);
 	}
 
 	if (m_sessionManager)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s] 모든 Recv/Send IO 취소 요청", __FUNCTION__);
+		LOGI("shutdown 3/6 : cancelling all recv/send IO");
 		m_sessionManager->RequestAllRecvSendIOCancel();
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s] 모든 Recv/Send IO 취소 처리 대기 중...", __FUNCTION__);
+		LOGI("shutdown 4/6 : waiting for recv/send cancellation");
 		m_sessionManager->WaitForAllRecvSendIOCancelComplete(10'000);
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s] 모든 ClientSession socket Close", __FUNCTION__);
+		LOGI("shutdown 5/6 : closing all client sockets");
 		m_sessionManager->DisconnectAllSessions();
 	}
 
 	// 서버 소켓의 모든 Accept I/O 를 취소시킨다.
 	// AcceptEx 를 사용하므로 모든 세션이 이미 Accept GQCS 에 등록되어 있다.
-	Logger::Log(LogLevel::LOG_INFO, "[%s] 서버 리슨 소켓 닫기", __FUNCTION__);
+	LOGI("shutdown 6/6 : cancelling listen socket IO");
 	if (!CancelAllAcceptIO())
 	{
 		__debugbreak();
@@ -229,21 +229,21 @@ void IOCPServer::StopServer()
 
 	//if (m_sessionManager)
 	//{
-	//	Logger::Log(LogLevel::LOG_INFO, "[%s] 모든 AcceptEx IO 취소 처리 대기 중...", __FUNCTION__);
+	//	LOGI("shutdown 2/6 : waiting for AcceptEx cancellation");
 	//	m_sessionManager->WaitForAllAcceptIOCancelComplete(10'000);
 	//}
 
 
 	// 서버 리슨 소켓을 닫아서 새 클라이언트 연결이 들어오는걸 먼저 막아야 한다.
-	Logger::Log(LogLevel::LOG_INFO, "[%s] 서버 리슨 소켓을 닫는 중...", __FUNCTION__);
+	LOGI("closing the listen socket");
 	DestroyListenSocket();
 
 	FinalizeGUIDAcceptEx();
 
 	// 연결 되어 있는 세션을 강제로 Disconnect 하고 클라이언트 소켓을 닫는다.
-	Logger::Log(LogLevel::LOG_INFO, "[%s] 연결되어 있는 세션을 강제로 Disconnect 중...", __FUNCTION__);
+	LOGI("forcing the remaining sessions to disconnect");
 
-	Logger::Log(LogLevel::LOG_INFO, "[%s] IOCP Core Shutdown 중...", __FUNCTION__);
+	LOGI("shutting down the IOCP core");
 	IOCPCore::Stop();
 
 	if (m_sessionManager)
@@ -367,7 +367,7 @@ void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ISession* session
 
 	if (ioOperation == IO_OPERATION::ACCEPT)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s][IO : %d] GQCS Failed Error SEND", __FUNCTION__, (int)ioOperation);
+		LOGW("accept io %d failed (error %d)", (int)ioOperation, errorCode);
 
 		if (errorCode == ERROR_OPERATION_ABORTED)
 		{
@@ -392,7 +392,7 @@ void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ISession* session
 			return;
 		}
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d][IO : %d] GQCS Failed Error RECV", __FUNCTION__, session->GetSessionID(), (int)ioOperation);
+		LOGW("session %u recv io failed (error %d)", session->GetSessionID(), errorCode);
 
 		switch (errorCode)
 		{
@@ -420,7 +420,7 @@ void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ISession* session
 			return;
 		}
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d][IO : %d] GQCS Failed Error SEND", __FUNCTION__, session->GetSessionID(), (int)ioOperation);
+		LOGW("session %u send io failed (error %d)", session->GetSessionID(), errorCode);
 
 		switch (errorCode)
 		{
@@ -449,14 +449,14 @@ void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ISession* session
 
 void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 {
-	Logger::Log(LogLevel::LOG_INFO, "[%s][%d] HandleAccept", __FUNCTION__, sessionId);
+	LOGT("accept completed on accept session %u", sessionId);
 
 	ISession* session = m_sessionManager->GetAcceptSession(sessionId);
 	AcceptSession* acceptSession = dynamic_cast<AcceptSession*>(session);
 
 	if (!acceptSession)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] AcceptEx 시작하려고 세션을 캐스팅 했는데 nullptr", __FUNCTION__);
+		LOGE("accept session cast failed : the session is not an AcceptSession");
 
 		__debugbreak();
 		return;
@@ -506,9 +506,9 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 			if (!PostAccept(acceptSession))
 			{
-				Logger::Log(LogLevel::LOG_ERROR, "[%s] 1 Dummy Session Accept 실패!", __FUNCTION__);
+				LOGE("failed to re-arm AcceptEx after the client session pool handed out nothing");
 
-				//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post accept\n", __FUNCTION__);
+				//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post accept");
 				return;
 			}
 		}
@@ -543,8 +543,7 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 					{
 						port = ::ntohs(remoteAddr->sin_port);
 
-						Logger::Log(LogLevel::LOG_INFO, "[%s][%d] Client Connected - IP: %s, Port: %d",
-							__FUNCTION__, clientSession->GetSessionID(), strIPAddress, port);
+						LOGT("accepted a connection from %s:%u", strIPAddress, port);
 					}
 				}
 			}
@@ -558,7 +557,7 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 				__debugbreak();
 			}
 
-			Logger::Log(LogLevel::LOG_INFO, "[%s][Listen Sesision : %d] socket(%d) 를 ClientSession(%d) 에 Attach", __FUNCTION__, session->GetSessionID(), (int)acceptedSocket, clientSession->GetSessionID());
+			LOGI("socket %d attached to session %u (via accept session %u)", (int)acceptedSocket, clientSession->GetSessionID(), session->GetSessionID());
 
 			clientSession->AttachSocket(acceptedSocket);
 			clientSession->SetRemoteAddress(strIPAddress, port);
@@ -575,9 +574,9 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 			if (!PostAccept(acceptSession))
 			{
-				Logger::Log(LogLevel::LOG_ERROR, "[%s] 2 Dummy Session Accept 실패!", __FUNCTION__);
+				LOGE("failed to re-arm AcceptEx after attaching the accepted socket");
 
-				//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post accept\n", __FUNCTION__);
+				//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post accept");
 				return;
 			}
 		}
@@ -587,7 +586,7 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 		// Client Session Pool 이 여유 없는 경우
 		// 해당 연결을 강제 종료 처리 후 Accept 를 걸어 준다.
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s][Listen Sesision : %d] Client Session Pool 에 비어 있는 Session 이 없어서 Disconnect 처리됨!", __FUNCTION__, session->GetSessionID());
+		LOGW("accept session %u rejected a connection : the client session pool is full", session->GetSessionID());
 
 		IOCPCore::CloseSocketHandle(acceptSession->DetachSocket());
 
@@ -600,9 +599,9 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 		if (!PostAccept(acceptSession))
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s] 3 Dummy Session Accept 실패!", __FUNCTION__);
+			LOGE("failed to re-arm AcceptEx after rejecting a connection (pool full)");
 
-			//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post accept\n", __FUNCTION__);
+			//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post accept");
 			return;
 		}
 		return;
@@ -614,7 +613,7 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 		return;
 	}
 
-	Logger::Log(LogLevel::LOG_INFO, "[%s][%d] 해당 세션 서버 연결 시퀀스 수행 진행", __FUNCTION__, clientSession->GetSessionID());
+	LOGT("session %u running the server-side connect sequence", clientSession->GetSessionID());
 
 	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
 	{
@@ -629,21 +628,21 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 	if (!SocketOption::SetAcceptContext(clientSession->GetClientSocket(), m_serverSocket))
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] SetAcceptContext 실패", __FUNCTION__, clientSession->GetSessionID());
+		LOGE("session %u SO_UPDATE_ACCEPT_CONTEXT failed, dropping the connection", clientSession->GetSessionID());
 		m_sessionManager->ReleaseClientSession(clientSession);
 		return;
 	}
 
 	if (!SocketOption::SetNoDelay(clientSession->GetClientSocket()))
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] SetNoDelay 실패", __FUNCTION__, clientSession->GetSessionID());
+		LOGE("session %u TCP_NODELAY failed, dropping the connection", clientSession->GetSessionID());
 		m_sessionManager->ReleaseClientSession(clientSession);
 		return;
 	}
 
 	if (!SocketOption::SetKeepAliveEx(clientSession->GetClientSocket(), 10'000, 1'000))
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] SetKeepAliveEx 실패", __FUNCTION__, clientSession->GetSessionID());
+		LOGE("session %u keepalive setup failed, dropping the connection", clientSession->GetSessionID());
 		m_sessionManager->ReleaseClientSession(clientSession);
 		return;
 	}
@@ -651,7 +650,7 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 	if (!IOCPCore::RegisterSocketToIOCP((ULONG_PTR)clientSession, clientSession->GetClientSocket()))
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] Client socket IOCP 등록 실패", __FUNCTION__, clientSession->GetSessionID());
+		LOGE("session %u could not be associated with the IOCP, dropping the connection", clientSession->GetSessionID());
 		m_sessionManager->ReleaseClientSession(clientSession);
 		return;
 	}
@@ -663,12 +662,12 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 	}
 	OnClientConnect(clientSession);
 
-	//Log::log(LogLevel::LOG_INFO, "[%s] New connection accepted. socket: %d\n", __FUNCTION__, session->getclientsocket());
+	//Log::log(LogLevel::LOG_INFO, "[%s] New connection accepted. socket: %d", session->getclientsocket());
 }
 
 void IOCPServer::HandleAcceptIOCancelled(uint32_t sessionId)
 {
-	Logger::Log(LogLevel::LOG_WARNING, "[%s] Listen Session Accept IO Canceled", __FUNCTION__);
+	LOGW("AcceptEx was cancelled on the listen socket");
 
 	ISession* session = m_sessionManager->GetAcceptSession(sessionId);
 
@@ -676,7 +675,7 @@ void IOCPServer::HandleAcceptIOCancelled(uint32_t sessionId)
 
 	if (!acceptSession)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] Listen Session is nullptr", __FUNCTION__);
+		LOGE("accept session cast failed : the session is not an AcceptSession");
 
 		return;
 	}
@@ -749,7 +748,7 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 			if (!HandleSystemPacket(clientSession, packetId, packetDataByMemoryPool, packetSize))
 			{
 				MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
-				Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] engine packet handling failed (PacketID : %u)", __FUNCTION__, clientSession->GetSessionID(), packetId);
+				LOGE("session %u engine packet handling failed (PacketID : %u)", clientSession->GetSessionID(), packetId);
 				m_sessionManager->ReleaseClientSession(clientSession);
 				return;
 			}
@@ -761,7 +760,7 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 		if (!clientSession->IsEstablished())
 		{
 			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
-			Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] service packet received before session established (PacketID : %u)", __FUNCTION__, clientSession->GetSessionID(), packetId);
+			LOGW("session %u service packet received before session established (PacketID : %u)", clientSession->GetSessionID(), packetId);
 			m_sessionManager->ReleaseClientSession(clientSession);
 			return;
 		}
@@ -805,7 +804,7 @@ void IOCPServer::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD
 
 	if (clientSession->GetSessionRole() != SESSION_ROLE::SERVER)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] CLIENT Session 이 아닌 세션 ID\n", __FUNCTION__);
+		LOGE("send completion arrived for a session whose role is not SERVER");
 
 		__debugbreak();
 		return;
@@ -871,22 +870,22 @@ bool IOCPServer::CreateListenSocket(const char* ipAddress, uint16_t port)
 
 	if (m_serverSocket == INVALID_SOCKET)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] WSASocket Listen socket failed\n", __FUNCTION__);
+		//Log::log(LogLevel::LOG_ERROR, "[%s] WSASocket Listen socket failed");
 		return false;
 	}
 
 
-	//Log::log(LogLevel::LOG_INFO, "[%s] WSASocket Listen socket success\n", __FUNCTION__);
+	//Log::log(LogLevel::LOG_INFO, "[%s] WSASocket Listen socket success");
 
 	// Listen 소켓도 IOCP에 연결
 	if (CreateIoCompletionPort((HANDLE)m_serverSocket, GetIOCPHandle(), (ULONG_PTR)m_serverSocket, 0) == NULL)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] CreateIoCompletionPort failed for listen socket - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
+		//Log::log(LogLevel::LOG_ERROR, "[%s] CreateIoCompletionPort failed for listen socket - ErroCode : %d", WSAGetLastError());
 
 		return false;
 	}
 
-	//Log::log(LogLevel::LOG_INFO, "[%s] CreateIoCompletionPort success for listen socket\n", __FUNCTION__);
+	//Log::log(LogLevel::LOG_INFO, "[%s] CreateIoCompletionPort success for listen socket");
 
 	return true;
 }
@@ -913,19 +912,19 @@ bool IOCPServer::BindServerSocket(SOCKET serverSocket, const char* ipAddress, ui
 		const int nResult = ::inet_pton(AF_INET, ipAddress, &serverAddr.sin_addr);
 		if (nResult != 1)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s] bind 에 사용할 IP 주소가 잘못됨: %s", __FUNCTION__, ipAddress);
+			LOGE("invalid bind address : %s", ipAddress);
 			return false;
 		}
 	}
 
 	if (::bind(serverSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] bind failed - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
+		//Log::log(LogLevel::LOG_ERROR, "[%s] bind failed - ErroCode : %d", WSAGetLastError());
 
 		return false;
 	}
 
-	//Log::log(LogLevel::LOG_INFO, "[%s] bind success\n", __FUNCTION__);
+	//Log::log(LogLevel::LOG_INFO, "[%s] bind success");
 
 	return true;
 }
@@ -934,12 +933,12 @@ bool IOCPServer::ListenServerSocket(SOCKET serverSocket)
 {
 	if (::listen(serverSocket, SOMAXCONN) == SOCKET_ERROR)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] listen failed - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
+		//Log::log(LogLevel::LOG_ERROR, "[%s] listen failed - ErroCode : %d", WSAGetLastError());
 
 		return false;
 	}
 
-	//Log::log(LogLevel::LOG_INFO, "[%s] listen success\n", __FUNCTION__);
+	//Log::log(LogLevel::LOG_INFO, "[%s] listen success");
 
 	return true;
 }
@@ -963,7 +962,7 @@ bool IOCPServer::InitializeGUIDAcceptEx(SOCKET serverSocket)
 		nullptr,
 		nullptr) == SOCKET_ERROR)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] WSAIoctl Get AcceptEX Pointer Failed - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
+		//Log::log(LogLevel::LOG_ERROR, "[%s] WSAIoctl Get AcceptEX Pointer Failed - ErroCode : %d", WSAGetLastError());
 
 		return false;
 	}
@@ -975,7 +974,7 @@ bool IOCPServer::InitializeGUIDAcceptEx(SOCKET serverSocket)
 		&m_getAcceptExSockAddrs, sizeof(m_getAcceptExSockAddrs),
 		&bytes, nullptr, nullptr) == SOCKET_ERROR)
 	{
-		//Log::log(LogLevel::LOG_ERROR, "[%s] WSAIoctl Get GetAcceptExSockaddrs Pointer Failed - ErroCode : %d\n", __FUNCTION__, WSAGetLastError());
+		//Log::log(LogLevel::LOG_ERROR, "[%s] WSAIoctl Get GetAcceptExSockaddrs Pointer Failed - ErroCode : %d", WSAGetLastError());
 
 		return false;
 	}
@@ -1042,14 +1041,14 @@ bool IOCPServer::PrepareAccept()
 
 		if (!session)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s] Accept Session 획득 실패\n", __FUNCTION__);
+			LOGE("could not get the accept session from the pool");
 			__debugbreak();
 			return false;
 		}
 
 		if (session->GetSessionRole() != SESSION_ROLE::ACCEPT)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s] Accept Session 이 아닌 세션 ID\n", __FUNCTION__);
+			LOGE("the session is not an accept session");
 
 			__debugbreak();
 			return false;
@@ -1057,14 +1056,14 @@ bool IOCPServer::PrepareAccept()
 
 		if (session->GetAcceptSessionState() != AcceptSessionState::ACCEPT_READY)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s] Accept Session 이 Accept 대기 중이 아님\n", __FUNCTION__);
+			LOGE("the accept session is not in ACCEPT_READY state");
 			__debugbreak();
 			return false;
 		}
 
 		if (!PostAccept(session))
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s] Accept Session AcceptEx 호출 실패\n", __FUNCTION__);
+			LOGE("PostAccept failed for the accept session");
 			__debugbreak();
 			return false;
 		}
@@ -1079,7 +1078,7 @@ bool IOCPServer::PrepareAccept(uint32_t sessionId)
 
 	if (!session)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] Accept Session 획득 실패\n", __FUNCTION__);
+		LOGE("could not get the accept session from the pool");
 
 		__debugbreak();
 		return false;
@@ -1087,7 +1086,7 @@ bool IOCPServer::PrepareAccept(uint32_t sessionId)
 
 	if (session->GetSessionRole() != SESSION_ROLE::ACCEPT)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] Accept Session 이 아닌 세션 ID\n", __FUNCTION__);
+		LOGE("the session is not an accept session");
 
 		__debugbreak();
 		return false;
@@ -1095,14 +1094,14 @@ bool IOCPServer::PrepareAccept(uint32_t sessionId)
 
 	if (session->GetAcceptSessionState() != AcceptSessionState::ACCEPT_READY)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] Accept Session 이 Accept 대기 중이 아님\n", __FUNCTION__);
+		LOGE("the accept session is not in ACCEPT_READY state");
 		__debugbreak();
 		return false;
 	}
 
 	if (!PostAccept(session))
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] Accept Session AcceptEx 호출 실패\n", __FUNCTION__);
+		LOGE("PostAccept failed for the accept session");
 
 		return false;
 	}
@@ -1114,7 +1113,7 @@ bool IOCPServer::PostAccept(ISession* session)
 {
 	if (!session)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] AcceptEx 시작하려고 세션을 캐스팅 했는데 nullptr", __FUNCTION__);
+		LOGE("accept session cast failed : the session is not an AcceptSession");
 
 		return false;
 	}
@@ -1123,12 +1122,12 @@ bool IOCPServer::PostAccept(ISession* session)
 
 	if (!acceptSession)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][Listen Sesision : %d] AcceptEx 시작하려고 세션을 캐스팅 했는데 nullptr", __FUNCTION__, acceptSession->GetSessionID());
+		LOGE("accept session cast failed : the session is not an AcceptSession");
 
 		return false;
 	}
 
-	Logger::Log(LogLevel::LOG_INFO, "[%s][Listen Sesision : %d] AcceptEx 시작", __FUNCTION__, session->GetSessionID());
+	LOGT("accept session %u posting AcceptEx", session->GetSessionID());
 
 	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
 	{
@@ -1153,12 +1152,12 @@ bool IOCPServer::PostAccept(ISession* session)
 		SOCKET clientSocket = ::WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 		if (clientSocket == INVALID_SOCKET)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s][Listen Sesision : %d] AcceptEx 시작하려고 WSASocket 호출하였는데 소켓이 INVALID", __FUNCTION__, acceptSession->GetSessionID());
+			LOGE("accept session %u WSASocket failed (error %d)", acceptSession->GetSessionID(), ::WSAGetLastError());
 
 			return false;
 		}
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s][Listen Sesision : %d] socket 생성(%d)", __FUNCTION__, session->GetSessionID(), (int)clientSocket);
+		LOGT("accept session %u created socket %d", session->GetSessionID(), (int)clientSocket);
 
 		// 세션에 클라이언트 소켓을 등록
 		acceptSession->SetClientSocket(clientSocket);
@@ -1204,21 +1203,21 @@ bool IOCPServer::PostAccept(ISession* session)
 
 				if (nError == WSAECONNRESET)
 				{
-					Logger::Log(LogLevel::LOG_WARNING, "[%s][Listen Sesision : %d] AcceptEx 도중 클라이언트 연결이 끊김", __FUNCTION__, acceptSession->GetSessionID());
+					LOGW("accept session %u : the peer disconnected during AcceptEx", acceptSession->GetSessionID());
 				}
 				else if (nError == WSAENOBUFS || nError == WSAEMFILE)
 				{
-					Logger::Log(LogLevel::LOG_ERROR, "[%s][Listen Sesision : %d] AcceptEx 시스템 리소스 부족", __FUNCTION__, acceptSession->GetSessionID());
+					LOGE("accept session %u AcceptEx hit a system resource shortage (error %d)", acceptSession->GetSessionID(), nError);
 					::Sleep(10);
 				}
 				else if (nError == ERROR_OPERATION_ABORTED)
 				{
-					Logger::Log(LogLevel::LOG_WARNING, "[%s][Listen Sesision : %d] AcceptEx Aborted", __FUNCTION__, acceptSession->GetSessionID());
+					LOGW("accept session %u AcceptEx aborted", acceptSession->GetSessionID());
 					return false;
 				}
 				else
 				{
-					Logger::Log(LogLevel::LOG_ERROR, "[%s][Listen Sesision : %d] AcceptEx 실패 (ERROR CODE : %d)", __FUNCTION__, acceptSession->GetSessionID(), nError);
+					LOGE("accept session %u AcceptEx failed (error %d)", acceptSession->GetSessionID(), nError);
 				}
 
 				continue;
@@ -1329,7 +1328,7 @@ bool IOCPServer::HandleSystemPacket(ClientSession* session, uint16_t packetId, c
 		}
 
 		session->SetServerSessionState(ServerSessionState::ESTABLISHED);
-		Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d] session established", __FUNCTION__, session->GetSessionID());
+		LOGI("session %u session established", session->GetSessionID());
 		return true;
 	}
 
@@ -1350,7 +1349,7 @@ bool IOCPServer::HandleSystemPacket(ClientSession* session, uint16_t packetId, c
 	}
 
 	default:
-		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] unhandled system packet id: %u", __FUNCTION__, session->GetSessionID(), packetId);
+		LOGW("session %u unhandled system packet id: %u", session->GetSessionID(), packetId);
 		return false;
 	}
 }

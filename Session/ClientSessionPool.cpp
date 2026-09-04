@@ -73,7 +73,7 @@ ISession* ClientSessionPool::Acquire()
 	// 여기서 어긋나면 프리 리스트가 오염된 것이므로 임대하지 않고 실패시킨다.
 	if (::InterlockedCompareExchange(&node->poolState, SESSION_POOL_IN_USE, SESSION_POOL_FREE) != SESSION_POOL_FREE)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] free list corrupted : node is not FREE (session %u)", __FUNCTION__, node->session ? node->session->GetSessionID() : UINT32_MAX);
+		LOGE("free list corrupted : node is not FREE (session %u)", node->session ? node->session->GetSessionID() : UINT32_MAX);
 		return nullptr;
 	}
 
@@ -93,7 +93,7 @@ void ClientSessionPool::Release(ISession* session)
 
 	if (!m_nodes || sessionId >= m_capacity)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s] invalid session id %u (capacity %u)", __FUNCTION__, sessionId, m_capacity);
+		LOGE("invalid session id %u (capacity %u)", sessionId, m_capacity);
 		return;
 	}
 
@@ -110,7 +110,9 @@ void ClientSessionPool::Release(ISession* session)
 	// 그 이후 Acquire 는 사용 중인 같은 세션을 반복해서 배포한다.
 	if (::InterlockedCompareExchange(&node->poolState, SESSION_POOL_RELEASING, SESSION_POOL_IN_USE) != SESSION_POOL_IN_USE)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %u] release skipped (already releasing or not in use)", __FUNCTION__, sessionId);
+		// 동시 disconnect 경로가 실제로 겹쳤다는 신호다. 드물게 발생하고
+		// 정상 처리되지만, 프리 리스트 가드가 동작했다는 유일한 증거이므로 남긴다.
+		LOGI("session %u release skipped (already releasing or not in use)", sessionId);
 		return;
 	}
 
@@ -297,7 +299,7 @@ uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t 
 			continue;
 		}
 
-		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] heartbeat timeout detected", __FUNCTION__, session->GetSessionID());
+		LOGW("session %u heartbeat timeout, disconnecting", session->GetSessionID());
 		session->MarkHeartbeatTimeout();
 		Release(session);
 		++disconnectedCount;

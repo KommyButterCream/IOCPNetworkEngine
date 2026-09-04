@@ -41,6 +41,24 @@ namespace
 
 		packetBuffer->Reset();
 	}
+
+	// 상대가 연결을 끊어서 발생한 I/O 실패인지 판정한다.
+	// 이건 정상적인 종료 경로이므로 ERROR 로 올리면 진짜 문제가 묻힌다.
+	bool IsPeerClosedError(int errorCode)
+	{
+		switch (errorCode)
+		{
+		case WSAECONNRESET:         // 상대가 강제 종료 (RST)
+		case WSAECONNABORTED:       // 연결 중단
+		case WSAENOTCONN:           // 이미 끊김
+		case WSAESHUTDOWN:          // 송수신 불가
+		case ERROR_NETNAME_DELETED: // 네트워크 이름 삭제 = 연결 끊김
+		case ERROR_OPERATION_ABORTED: // CancelIoEx 로 인한 정상 취소
+			return true;
+		default:
+			return false;
+		}
+	}
 }
 
 ClientSession::ClientSession()
@@ -261,16 +279,26 @@ bool ClientSession::OnConnect()
 		SetServerSessionState(ServerSessionState::CONNECTED);
 	}
 
-	Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d] 클라이언트 Accept 완료", __FUNCTION__, GetSessionID());
+	// 접속 1건에 로그 2줄을 쓰던 것을 한 줄로 합친다.
+	// 원격 주소는 서버 역할에서만 채워진다 (SetRemoteAddress 는 HandleAccept 가 호출).
+	// 클라이언트 역할이면 비어 있으므로 찍지 않는다.
+	if (m_clientIPAddress[0] != '\0')
+	{
+		LOGI("session %u connected from %s:%u (role %d)",
+			GetSessionID(), m_clientIPAddress, m_clientPort, static_cast<int>(GetSessionRole()));
+	}
+	else
+	{
+		LOGI("session %u connected (role %d)", GetSessionID(), static_cast<int>(GetSessionRole()));
+	}
 
-	Logger::Log(LogLevel::LOG_HIGH, "[%s][ClientSession : %d] IP : %s, Port : %d", __FUNCTION__, GetSessionID(), m_clientIPAddress, m_clientPort);
 	UpdateLastRecvTick();
 	UpdateLastHeartbeatTick();
 
 	if (!PostReceive())
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] 클라이언트 Accept 후 WSARecv 실패", __FUNCTION__, GetSessionID());
-
+		// 첫 수신을 걸지 못하면 이 세션은 아무것도 받을 수 없다.
+		LOGE("session %u failed to post the first recv right after connect", GetSessionID());
 		return false;
 	}
 
@@ -283,11 +311,13 @@ bool ClientSession::OnDisconnect()
 
 	if (::InterlockedExchange(&m_closing, 1) == 0)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d] CloseSocket(%d) 시작", __FUNCTION__, GetSessionID(), (int)GetClientSocket());
-
 		if (!IsSocketInvalid())
 		{
-			Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] 소켓이 정리되지 않은 상태에서 Disconnect 처리됨 (Socket : %d)", __FUNCTION__, GetSessionID(), static_cast<int>(GetClientSocket()));
+			// 소켓은 반드시 DetachSocket 으로 먼저 떼어낸 뒤 여기 와야 한다.
+			// 이전 메시지는 "CloseSocket(%d) 시작" 이었는데, 정상 경로에서는
+			// 소켓이 이미 분리되어 항상 -1 이 찍혀 오히려 오해를 유발했다.
+			LOGE("session %u disconnecting with a live socket %d. it was not detached",
+				GetSessionID(), static_cast<int>(GetClientSocket()));
 			__debugbreak();
 			return false;
 		}
@@ -450,7 +480,7 @@ bool ClientSession::PostReceive()
 
 	if (!IsTransportConnected())
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] 세션이 연결 중이 아님", __FUNCTION__, GetSessionID());
+		LOGE("session %u cannot post recv : the session is not connected", GetSessionID());
 
 		return false;
 	}
@@ -466,7 +496,7 @@ bool ClientSession::PostReceive()
 
 	if (m_recvOverlapped.wsaBuffer.len == 0)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] Recv 를 위한 버퍼가 꽉 참", __FUNCTION__, GetSessionID());
+		LOGE("session %u recv ring is full, cannot post recv (stored %u / capacity %u)", GetSessionID(), GetReceiveBuffer().GetStoredSize(), RECV_PACKET_BUFFER_SIZE);
 
 		// 버퍼에 공간이 부족한 경우 시간을 저장했다가
 		// 별도의 타이머 스레드에서 타임아웃 관련 처리(Session Disconnect 등) 하도록 한다.
@@ -500,7 +530,10 @@ bool ClientSession::PostReceive()
 		int errorCode = ::WSAGetLastError();
 		if (errorCode != WSA_IO_PENDING)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] WSARecv 실패(ERROR CODE : %d)", __FUNCTION__, GetSessionID(), errorCode);
+			if (IsPeerClosedError(errorCode))
+				LOGI("session %u recv ended : the peer closed the connection (error %d)", GetSessionID(), errorCode);
+			else
+				LOGE("session %u WSARecv failed (error %d)", GetSessionID(), errorCode);
 
 			// 더이상 해당 세션에 I/O 를 걸 수 없는 상태이므로 중요한 예외 처리 부분이다!
 			HandleSocketError(errorCode, IO_OPERATION::RECV);
@@ -605,7 +638,10 @@ bool ClientSession::PostCurrentSend()
 		int errorCode = WSAGetLastError();
 		if (errorCode != WSA_IO_PENDING)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] WSASend 실패(ERROR CODE : %d)", __FUNCTION__, GetSessionID(), errorCode);
+			if (IsPeerClosedError(errorCode))
+				LOGI("session %u send ended : the peer closed the connection (error %d)", GetSessionID(), errorCode);
+			else
+				LOGE("session %u WSASend failed (error %d)", GetSessionID(), errorCode);
 
 			// 더이상 해당 세션에 I/O 를 걸 수 없는 상태이므로 중요한 예외 처리 부분이다!
 			HandleSocketError(errorCode, IO_OPERATION::SEND);
@@ -664,7 +700,7 @@ bool ClientSession::EnqueueJob(Job* job, bool& wasEmpty)
 	// 세션 JobQueue에 enqueue
 	if (!GetJobQueue().EnqueueJob(job, wasEmpty))
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] Failed to enqueue Job for sessionD", __FUNCTION__, GetSessionID());
+		LOGE("session %u failed to enqueue a job", GetSessionID());
 
 		__debugbreak();
 
@@ -698,19 +734,19 @@ bool ClientSession::EnqueueSendPacket(void** packetData, uint32_t packetSize)
 	const PACKET_HEADER* packetHeader = reinterpret_cast<const PACKET_HEADER*>(*packetData);
 	if (packetHeader == nullptr || packetSize < sizeof(PACKET_HEADER))
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] invalid packet header", __FUNCTION__, GetSessionID());
+		LOGE("session %u invalid packet header", GetSessionID());
 		return false;
 	}
 
 	if (packetHeader->packetSize != packetSize)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] packet size mismatch (header=%u, arg=%u)", __FUNCTION__, GetSessionID(), packetHeader->packetSize, packetSize);
+		LOGE("session %u packet size mismatch (header=%u, arg=%u)", GetSessionID(), packetHeader->packetSize, packetSize);
 		return false;
 	}
 
 	if (!CanSendPacket(packetHeader->packetId))
 	{
-		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] packet send blocked before session established (PacketID : %u)", __FUNCTION__, GetSessionID(), packetHeader->packetId);
+		LOGW("session %u packet send blocked before session established (PacketID : %u)", GetSessionID(), packetHeader->packetId);
 		return false;
 	}
 
@@ -723,7 +759,7 @@ bool ClientSession::EnqueueSendPacket(void** packetData, uint32_t packetSize)
 		//
 		// 실패 시 Enqueue 는 *packetData 를 nullptr 로 만들지 않으므로
 		// 패킷 메모리의 소유권은 호출자가 계속 보유한다. 호출자가 해제해야 한다.
-		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] send queue full, packet dropped (PacketID : %u, Size : %u)", __FUNCTION__, GetSessionID(), packetHeader->packetId, packetSize);
+		LOGW("session %u send queue full, packet dropped (PacketID : %u, Size : %u)", GetSessionID(), packetHeader->packetId, packetSize);
 		return false;
 	}
 
@@ -740,25 +776,25 @@ bool ClientSession::EnqueueSharedSendPacket(const void* packetData, uint32_t pac
 	const PACKET_HEADER* packetHeader = reinterpret_cast<const PACKET_HEADER*>(packetData);
 	if (packetHeader == nullptr || packetSize < sizeof(PACKET_HEADER))
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] invalid packet header", __FUNCTION__, GetSessionID());
+		LOGE("session %u invalid packet header", GetSessionID());
 		return false;
 	}
 
 	if (packetHeader->packetSize != packetSize)
 	{
-		Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] packet size mismatch (header=%u, arg=%u)", __FUNCTION__, GetSessionID(), packetHeader->packetSize, packetSize);
+		LOGE("session %u packet size mismatch (header=%u, arg=%u)", GetSessionID(), packetHeader->packetSize, packetSize);
 		return false;
 	}
 
 	if (!CanSendPacket(packetHeader->packetId))
 	{
-		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] packet send blocked before session established (PacketID : %u)", __FUNCTION__, GetSessionID(), packetHeader->packetId);
+		LOGW("session %u packet send blocked before session established (PacketID : %u)", GetSessionID(), packetHeader->packetId);
 		return false;
 	}
 
 	if (!GetSendPacketQueue()->EnqueueShared(packetData, packetSize, releaseFunc, releaseContext))
 	{
-		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] failed to enqueue shared SendPacket", __FUNCTION__, GetSessionID());
+		LOGW("session %u failed to enqueue shared SendPacket", GetSessionID());
 		return false;
 	}
 
@@ -769,7 +805,10 @@ bool ClientSession::EnqueueSharedSendPacket(const void* packetData, uint32_t pac
 
 void ClientSession::HandleSocketError(int errorCode, IO_OPERATION ioOperation)
 {
-	Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d][IO : %d] 에러 핸들링", __FUNCTION__, GetSessionID(), (int)ioOperation);
+	if (IsPeerClosedError(errorCode))
+		LOGI("session %u io %d ended : the peer closed the connection (error %d)", GetSessionID(), (int)ioOperation, errorCode);
+	else
+		LOGE("session %u io %d socket error %d", GetSessionID(), (int)ioOperation, errorCode);
 
 	// 공용으로 처리 되어야 하는 예외 처리
 	// WSASend 호출 이전에 증가시켰던 Send/Recv IO Count 복구

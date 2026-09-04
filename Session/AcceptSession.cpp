@@ -58,7 +58,11 @@ void AcceptSession::Finalize()
 bool AcceptSession::OnAccept()
 {
 	SetAcceptSessionState(AcceptSessionState::ACCEPT_COMPLETE);
-	Logger::Log(LogLevel::LOG_INFO, "[%s][AcceptSession : %d] accept complete", __FUNCTION__, GetSessionID());
+
+	// 접속 1건당 호출된다. HandleAccept 가 같은 사실을 더 자세히 남기므로
+	// 여기서는 추적 레벨로만 둔다.
+	LOGT("accept session %u complete", GetSessionID());
+
 	return true;
 }
 
@@ -71,11 +75,14 @@ bool AcceptSession::OnDisconnect()
 {
 	if (::InterlockedExchange(&m_closing, 1) == 0)
 	{
-		Logger::Log(LogLevel::LOG_INFO, "[%s][AcceptSession : %d] begin disconnect socket(%d)", __FUNCTION__, GetSessionID(), (int)GetClientSocket());
+		LOGT("accept session %u disconnecting", GetSessionID());
 
 		if (!IsSocketInvalid())
 		{
-			Logger::Log(LogLevel::LOG_WARNING, "[%s][AcceptSession : %d] socket was not detached before disconnect (%d)", __FUNCTION__, GetSessionID(), static_cast<int>(GetClientSocket()));
+			// 소켓은 반드시 DetachSocket 으로 먼저 떼어낸 뒤 여기 와야 한다.
+			// 그러지 않으면 소켓이 닫히지 않고 새는 상태로 세션이 회수된다.
+			LOGE("accept session %u disconnecting with a live socket %d. it was not detached",
+				GetSessionID(), static_cast<int>(GetClientSocket()));
 			__debugbreak();
 			return false;
 		}
