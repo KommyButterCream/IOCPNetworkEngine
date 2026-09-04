@@ -2,6 +2,10 @@
 
 #include "AcceptSession.h"
 
+#include "../Diagnostics/EngineAssert.h"
+
+using namespace Core::Util;
+
 #include <WinSock2.h>
 
 #include "../../Core/Sync/SRWLockGuard.h"
@@ -68,7 +72,7 @@ void AcceptSessionPool::RequestAllAcceptIOCancel()
 			// 여기에서 호출해주는 이유는 m_cancelIo 와 m_ioCancelCompleteEvent 를 설정해주기 위함.
 			if (!session->CancelPendingIO())
 			{
-				__debugbreak();
+				ENGINE_VIOLATION("accept session %u CancelPendingIO failed", session->GetSessionID());
 			}
 
 			// Accept Session 은 소켓을 강제로 닫거나, 서버 소켓이 닫히는 경우에만 IO Abort 를 수신한다.
@@ -102,7 +106,7 @@ bool AcceptSessionPool::WaitForAllAcceptIOCancelComplete(const uint32_t timeout_
 		{
 			if (!session->WaitForIOCancelComplete(timeout_ms))
 			{
-				__debugbreak();
+				ENGINE_VIOLATION("accept session %u IO cancel did not complete within %u ms", session->GetSessionID(), timeout_ms);
 				return false;
 			}
 

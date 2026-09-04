@@ -1,6 +1,8 @@
 ﻿#include "IOCPCore.h"
 
 #include <stdio.h> // for swprintf_s
+
+#include "../Diagnostics/EngineAssert.h"
 #include <new>     // for std::nothrow
 
 #include "../../Core/Util/Logger.h"
@@ -322,7 +324,7 @@ void IOCPCore::RequestIOCPThreadTerminate()
 		{
 			const DWORD error = ::GetLastError();
 			LOGE("failed to post the terminate code to worker %lu (error %lu)", i, error);
-			__debugbreak();
+			ENGINE_BREAK_IF_DEBUGGER();
 		}
 	}
 }

@@ -7,6 +7,9 @@
     <Filter Include="Core">
       <UniqueIdentifier>{57c9e6e2-6a27-4f00-a798-f69fe7a1dce5}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Diagnostics">
+      <UniqueIdentifier>{49a7e324-a308-4ee2-98a5-a0e5ef104090}</UniqueIdentifier>
+    </Filter>
     <Filter Include="HandlerTable">
       <UniqueIdentifier>{3fb79279-adb9-4cf1-ba45-24d018633a12}</UniqueIdentifier>
     </Filter>
@@ -121,6 +124,9 @@
     </ClInclude>
     <ClInclude Include="..\Core\IOCPServer.h">
       <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Diagnostics\EngineAssert.h">
+      <Filter>Diagnostics</Filter>
     </ClInclude>
     <ClInclude Include="..\HandlerTable\PacketHandlerTable.h">
       <Filter>HandlerTable</Filter>

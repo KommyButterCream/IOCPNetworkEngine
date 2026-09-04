@@ -2,6 +2,8 @@
 
 #include <Windows.h>
 
+#include "../Diagnostics/EngineAssert.h"
+
 #include "../../Core/Util/Logger.h"
 #include "../Session/SessionManager.h"
 
@@ -40,7 +42,7 @@ void HeartbeatThread::Run()
 
 		if (waitResult != WAIT_TIMEOUT)
 		{
-			__debugbreak();
+			ENGINE_VIOLATION("heartbeat wait returned %lu (error %lu), stopping the thread", waitResult, ::GetLastError());
 			break;
 		}
 

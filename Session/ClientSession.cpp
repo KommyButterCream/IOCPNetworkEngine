@@ -1,6 +1,8 @@
 ﻿#include "ClientSession.h"
 
 #include <WinSock2.h>
+
+#include "../Diagnostics/EngineAssert.h"
 #include <ws2ipdef.h> // for INET_ADDRSTRLEN
 
 #include "SessionJobQueue.h"
@@ -318,7 +320,7 @@ bool ClientSession::OnDisconnect()
 			// 소켓이 이미 분리되어 항상 -1 이 찍혀 오히려 오해를 유발했다.
 			LOGE("session %u disconnecting with a live socket %d. it was not detached",
 				GetSessionID(), static_cast<int>(GetClientSocket()));
-			__debugbreak();
+			ENGINE_BREAK_IF_DEBUGGER();
 			return false;
 		}
 
@@ -505,9 +507,7 @@ bool ClientSession::PostReceive()
 			m_lastRecvBufferFullTime = ::GetTickCount64();
 		}
 
-		//Log::log(LogLevel::LOG_WARNING, "[%s] Buffer space is not enough to send data.\n", __FUNCTION__);
-
-		__debugbreak();
+		ENGINE_BREAK_IF_DEBUGGER();
 
 		return false;
 	}
@@ -702,7 +702,7 @@ bool ClientSession::EnqueueJob(Job* job, bool& wasEmpty)
 	{
 		LOGE("session %u failed to enqueue a job", GetSessionID());
 
-		__debugbreak();
+		ENGINE_BREAK_IF_DEBUGGER();
 
 		return false;
 	}
@@ -924,7 +924,10 @@ void ClientSession::SetRemoteAddress(const char* ipAddress, uint16_t port)
 	if (ipAddress == nullptr)
 		return;
 
-	memcpy_s(m_clientIPAddress, sizeof(m_clientIPAddress), ipAddress, INET_ADDRSTRLEN);
+	// 이전에는 memcpy_s(..., ipAddress, INET_ADDRSTRLEN) 로 소스에서 무조건
+	// 22바이트를 읽었다. ipAddress 가 그보다 짧은 버퍼면 범위를 넘어 읽는다.
+	// strncpy_s + _TRUNCATE 는 널 종료까지만 읽고, 대상 크기를 넘으면 자른다.
+	::strncpy_s(m_clientIPAddress, sizeof(m_clientIPAddress), ipAddress, _TRUNCATE);
 	m_clientPort = port;
 }
 

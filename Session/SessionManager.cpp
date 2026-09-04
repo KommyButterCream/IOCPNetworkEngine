@@ -1,6 +1,10 @@
 ﻿#include "SessionManager.h"
 
 #include "AcceptSession.h"
+
+#include "../Diagnostics/EngineAssert.h"
+
+using namespace Core::Util;
 #include "AcceptSessionPool.h"
 #include "ClientSession.h"
 #include "ClientSessionPool.h"
@@ -111,20 +115,17 @@ ISession* SessionManager::AcquireClientSession()
 	if (!m_clientSessionPool)
 		return nullptr;
 
-	ISession* session = nullptr;
+	// 이전에는 실패 시 100회 busy retry 를 돌렸다. Acquire 가 nullptr 이면
+	// 프리 리스트가 비었다는 뜻이고, 양보 없는 루프로는 채워질 수 없으므로
+	// CPU 만 태우는 코드였다. 게다가 정확히 100번째에 성공하면
+	// retryCount == maxRetryCount 가 참이 되어 성공했는데도 단정에 걸렸다.
+	ISession* session = m_clientSessionPool->Acquire();
 
-	constexpr int maxRetryCount = 100;
-	int retryCount = 0;
-
-	do
+	if (!session)
 	{
-		session = m_clientSessionPool->Acquire();
-		++retryCount;
-	} while (!session && retryCount < maxRetryCount);
-
-	if (retryCount == maxRetryCount)
-	{
-		__debugbreak();
+		// 호출부(HandleAccept)가 연결을 거절하는 정상 경로다.
+		LOGW("client session pool is exhausted (capacity %u), the connection will be rejected",
+			m_clientSessionPool->GetSessionCount());
 	}
 
 	return session;
@@ -135,18 +136,12 @@ void SessionManager::ReleaseClientSession(ISession* session)
 	if (!m_clientSessionPool)
 		return;
 
-	if (session == nullptr)
-	{
-		__debugbreak();
-		return;
-	}
+	ENGINE_CHECK_RETVOID(session != nullptr, "ReleaseClientSession called with a null session");
 
 	const uint32_t sessionId = session->GetSessionID();
-	if (sessionId >= m_clientSessionPool->GetSessionCount())
-	{
-		__debugbreak();
-		return;
-	}
+	ENGINE_CHECK_RETVOID(sessionId < m_clientSessionPool->GetSessionCount(),
+		"ReleaseClientSession called with session id %u but capacity is %u",
+		sessionId, m_clientSessionPool->GetSessionCount());
 
 	m_clientSessionPool->Release(session);
 }

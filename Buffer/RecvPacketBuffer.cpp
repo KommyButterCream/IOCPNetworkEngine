@@ -2,6 +2,10 @@
 
 #include "PreDefine.h"
 
+#include "../Diagnostics/EngineAssert.h"
+
+using namespace Core::Util;
+
 #include "../Memory/SlabMemoryPool.h"
 #include "../Memory/SlabMemoryPoolHelper.h"
 
@@ -100,8 +104,10 @@ bool RecvPacketBuffer::CommitWrite(const uint32_t bytesReceived)
 	const uint32_t writeableSize = GetWriteableSize();
 	if (bytesReceived > writeableSize)
 	{
-		// 버퍼 overflow
-		__debugbreak();
+		// 버퍼 overflow. GetWriteableSize 가 준 크기보다 많이 받았다는 뜻이므로
+		// WSARecv 에 넘긴 버퍼 길이와 커밋 크기가 어긋난 것이다.
+		ENGINE_VIOLATION("recv ring overflow : committing %u bytes but only %u writeable (stored %u)",
+			bytesReceived, writeableSize, m_storedSize);
 		return false;
 	}
 
@@ -161,7 +167,8 @@ bool RecvPacketBuffer::ReadPacket(char*& outBuffer, uint32_t& outSize, uint16_t&
 	//char* packetMemory = reinterpret_cast<char*>(m_packetMemoryPool->Acquire(header.packetSize));
 	if (!packetMemory)
 	{
-		__debugbreak();
+		// 패킷 풀에서 메모리를 못 얻었다. 구체적 원인은 SlabMemoryPool 이 남긴다.
+		ENGINE_VIOLATION("failed to acquire %u bytes for an incoming packet, dropping it", header.packetSize);
 		return false;
 	}
 

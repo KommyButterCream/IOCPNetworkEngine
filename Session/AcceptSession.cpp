@@ -2,6 +2,8 @@
 
 #include <WinSock2.h>
 
+#include "../Diagnostics/EngineAssert.h"
+
 #include "../../Core/Util/Logger.h"
 
 using namespace Core::Util;
@@ -83,7 +85,7 @@ bool AcceptSession::OnDisconnect()
 			// 그러지 않으면 소켓이 닫히지 않고 새는 상태로 세션이 회수된다.
 			LOGE("accept session %u disconnecting with a live socket %d. it was not detached",
 				GetSessionID(), static_cast<int>(GetClientSocket()));
-			__debugbreak();
+			ENGINE_BREAK_IF_DEBUGGER();
 			return false;
 		}
 

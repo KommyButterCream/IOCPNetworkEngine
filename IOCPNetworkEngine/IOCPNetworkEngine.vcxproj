@@ -51,6 +51,7 @@
     <ClInclude Include="..\Core\IOCPClient.h" />
     <ClInclude Include="..\Core\IOCPCore.h" />
     <ClInclude Include="..\Core\IOCPServer.h" />
+    <ClInclude Include="..\Diagnostics\EngineAssert.h" />
     <ClInclude Include="..\HandlerTable\PacketHandlerTable.h" />
     <ClInclude Include="..\Job\Job.h" />
     <ClInclude Include="..\Job\JobDefs.h" />

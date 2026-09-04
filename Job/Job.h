@@ -1,6 +1,8 @@
 ﻿#pragma once
 
 #include <stdint.h>
+
+#include "../Diagnostics/EngineAssert.h"
 #include "JobDefs.h"
 
 // Scheduler 가 Task 를 수행하기 위한 기본 단위
@@ -47,7 +49,9 @@ __declspec(align(64)) struct Job
 				bool result = packetFunc(reinterpret_cast<ISession*>(target), data, size, context);
 				if (!result)
 				{
-					__debugbreak();
+					// 핸들러가 false 를 반환한 것은 정상적인 실패 표현이다.
+					// 이전에는 여기서 __debugbreak 로 프로세스를 죽였다.
+					LOGW("packet handler for id %u returned failure", packetId);
 				}
 			}
 			break;

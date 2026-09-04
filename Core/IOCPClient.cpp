@@ -1,6 +1,8 @@
 ﻿#include "IOCPClient.h"
 
 #include <WinSock2.h>
+
+#include "../Diagnostics/EngineAssert.h"
 #include <MSWSock.h> // for ConnectEx
 #include <ws2tcpip.h> // for inet_pton
 
@@ -46,7 +48,14 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port)
 	strcpy_s(m_serverIPAddress, sizeof(m_serverIPAddress), serverIp);
 	m_serverPort = port;
 
-	SetIOCPThreadCount(1);
+	// 워커가 1개면 완료 핸들러 안에서 블로킹하는 순간 데드락이 된다.
+	// 엔진의 disconnect 경로(OnDisconnectRequest)는 CancelPendingIO 후
+	// WaitForIOCancelComplete 로 최대 10초를 기다리는데, 그 대기를 풀어 줄
+	// 취소 완료 통지를 처리할 스레드가 바로 그 블로킹된 워커 자신이다.
+	// 최소 2개를 두어 한 워커가 대기 중이어도 다른 워커가 완료를 처리하게 한다.
+	//
+	// 근본 해결은 disconnect 를 동기 대기 없이 refcount 기반으로 지연 처리하는 것이다.
+	SetIOCPThreadCount(2);
 
 	if (!IOCPCore::Start())
 	{
@@ -235,9 +244,12 @@ void IOCPClient::HandleCompletion(ULONG_PTR completionKey, LPOVERLAPPED overlapp
 	ISession* session = reinterpret_cast<ISession*>(completionKey);
 	OverlappedEx* overlappedEx = reinterpret_cast<OverlappedEx*>(overlapped);
 
+	// GQCS 자체가 실패하면 overlapped 가 nullptr 로 온다.
+	// 종료 중 IOCP 핸들이 닫히는 경우가 대표적이다.
 	if (session == nullptr || overlappedEx == nullptr)
 	{
-		__debugbreak();
+		LOGW("completion arrived with session %p overlapped %p (status %d, error %lu)",
+			session, overlappedEx, completionStatus, ::GetLastError());
 		return;
 	}
 
@@ -260,7 +272,7 @@ void IOCPClient::HandleCompletion(ULONG_PTR completionKey, LPOVERLAPPED overlapp
 		HandleSend(overlappedEx, session, bytesTransferred);
 		break;
 	default:
-		//Log::log(LogLevel::LOG_ERROR, "[%s] Unknown operation - ErrorCode: %d", WSAGetLastError());
+		ENGINE_VIOLATION("completion arrived with an unknown io operation %d", static_cast<int>(overlappedEx->operation));
 		break;
 	}
 }
@@ -291,7 +303,12 @@ void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ISession* session
 			HandleConnectCancelled(overlappedEx, session);
 			break;
 		default:
-			__debugbreak();
+			// 분류되지 않은 에러 코드. 그냥 빠져나가면 IncrementIO 로 올려둔
+			// 카운트가 내려가지 않아 이 세션이 영구히 취소 대기에 묶인다.
+			// 취소 처리로 보내 카운트를 정리한다.
+			ENGINE_VIOLATION("session %u unhandled connect error %d, treating it as a cancellation", session->GetSessionID(), errorCode);
+			HandleConnectCancelled(overlappedEx, session);
+			break;
 		}
 		return;
 	}
@@ -312,7 +329,11 @@ void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ISession* session
 			HandleRecvCancelled(overlappedEx, session);
 			break;
 		default:
-			__debugbreak();
+			// 분류되지 않은 에러 코드. 빠져나가면 IO 카운트가 누출되므로
+			// 취소 처리로 보내 카운트를 정리한다.
+			ENGINE_VIOLATION("session %u unhandled recv error %d, treating it as a cancellation", session->GetSessionID(), errorCode);
+			HandleRecvCancelled(overlappedEx, session);
+			break;
 		}
 
 		return;
@@ -332,40 +353,52 @@ void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ISession* session
 			HandleSendCancelled(overlappedEx, session);
 			break;
 		default:
-			__debugbreak();
+			// 분류되지 않은 에러 코드. 빠져나가면 IO 카운트가 누출되므로
+			// 취소 처리로 보내 카운트를 정리한다.
+			ENGINE_VIOLATION("session %u unhandled send error %d, treating it as a cancellation", session->GetSessionID(), errorCode);
+			HandleSendCancelled(overlappedEx, session);
+			break;
 		}
 
 		return;
 	}
 	else
 	{
-		__debugbreak();
+		ENGINE_VIOLATION("socket error reported for an unknown io operation %d (error %d)", static_cast<int>(ioOperation), errorCode);
 		return;
 	}
 }
 
 void IOCPClient::HandleConnect(uint32_t sessionId, DWORD bytesTransferred)
 {
-	if (!m_session)
-	{
-		__debugbreak();
-		return;
-	}
+	ENGINE_CHECK_RETVOID(m_session != nullptr, "connect completion arrived but there is no session");
+
+	// ConnectEx 에 대한 IO 카운트를 먼저 내려놓는다.
+	//
+	// 이전에는 SetClientContext / SetNoDelay 가 실패하면 DecrementIO 없이
+	// 그대로 return 했다. 그러면 카운트가 1 에 머물러 이 세션은 이후
+	// WaitForIOCancelComplete 에서 영구히 풀리지 않는다(10초 타임아웃 후 단정).
+	// 실패 여부와 무관하게 완료 통지 1건은 소비했으므로 여기서 내린다.
+	m_session->DecrementIO();
 
 	if (!SocketOption::SetClientContext(m_clientSocket))
 	{
+		LOGE("session %u SO_UPDATE_CONNECT_CONTEXT failed, dropping the connection", m_session->GetSessionID());
+		OnDisconnectRequest(m_session);
 		return;
 	}
 
 	if (!SocketOption::SetNoDelay(m_clientSocket))
 	{
+		LOGE("session %u TCP_NODELAY failed, dropping the connection", m_session->GetSessionID());
+		OnDisconnectRequest(m_session);
 		return;
 	}
 
-	m_session->DecrementIO(); // 접속 성공 했으니 ConnectEx 에 대한 IO 1개 감소
-
 	if (!m_session->OnConnect())
 	{
+		LOGE("session %u OnConnect failed, dropping the connection", m_session->GetSessionID());
+		OnDisconnectRequest(m_session);
 		return;
 	}
 
@@ -422,19 +455,24 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 		return;
 	}
 
-	ClientSession* clientSession = dynamic_cast<ClientSession*>(session);
+	ClientSession* clientSession = static_cast<ClientSession*>(session);
 
-	clientSession->DecrementIO();
+	// DecrementIO 는 이 함수 끝에서 한다. 서버 쪽 HandleRecv 와 같은 이유다.
+	// 카운트를 먼저 내리면 "카운트 0 = 아무도 세션을 만지지 않음" 이 깨지고,
+	// 그 틈에 다른 스레드가 취소 대기를 통과해 세션을 정리할 수 있다.
+	bool disconnectAfterHandling = false;
+
 	clientSession->UpdateLastRecvTick();
 
 	RecvPacketBuffer& recvBuf = clientSession->GetReceiveBuffer();
 
 	if (!recvBuf.CommitWrite(bytesTransferred))
 	{
-		LOGE("session %u recv ring commit failed : %lu bytes would overflow (stored %u / capacity %u)",
+		ENGINE_VIOLATION("session %u recv ring commit failed : %lu bytes would overflow (stored %u / capacity %u)",
 			clientSession->GetSessionID(), bytesTransferred,
 			recvBuf.GetStoredSize(), RECV_PACKET_BUFFER_SIZE);
-		__debugbreak();
+
+		clientSession->DecrementIO();
 		return;
 	}
 
@@ -453,24 +491,27 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 
 		if (!IsValidPacketId(packetId))
 		{
-			// 외부 입력으로 트리거 가능한 검증 실패다.
-			// 현재는 여기서 멈추지 않고 그대로 디스패치까지 진행한다.
-			LOGE("session %u received an invalid packet id %u (size %u)",
+			// 스트림이 어긋났다. 디스패치하지 않고 연결을 끊는다.
+			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
+			LOGE("session %u received an invalid packet id %u (size %u). dropping the connection",
 				clientSession->GetSessionID(), packetId, packetSize);
-			__debugbreak();
+			disconnectAfterHandling = true;
+			break;
 		}
 
 		if (IsSystemPacketId(packetId))
 		{
-			if (!HandleSystemPacket(clientSession, packetId, packetDataByMemoryPool, packetSize))
-			{
-				MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
-				LOGE("session %u engine packet handling failed (PacketID : %u)", clientSession->GetSessionID(), packetId);
-				OnDisconnectRequest(clientSession);
-				return;
-			}
+			const bool handled = HandleSystemPacket(clientSession, packetId, packetDataByMemoryPool, packetSize);
 
 			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
+
+			if (!handled)
+			{
+				LOGE("session %u engine packet handling failed (PacketID : %u)", clientSession->GetSessionID(), packetId);
+				disconnectAfterHandling = true;
+				break;
+			}
+
 			continue;
 		}
 
@@ -478,20 +519,33 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 		{
 			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
 			LOGW("session %u service packet received before session established (PacketID : %u)", clientSession->GetSessionID(), packetId);
-			OnDisconnectRequest(clientSession);
-			return;
+			disconnectAfterHandling = true;
+			break;
 		}
 
 		// 패킷 완성! 실제 처리 호출
 		OnReceive(clientSession, packetId, packetDataByMemoryPool, packetSize);
 	}
 
-	// 다시 다음 수신 요청
-	// 실패하면 이 세션은 pending recv 가 없는 상태로 남아 통신이 조용히 멈춘다.
-	if (!clientSession->PostReceive())
+	if (!disconnectAfterHandling)
 	{
-		LOGE("session %u failed to re-arm recv. the session now has no pending IO",
-			clientSession->GetSessionID());
+		// 다시 다음 수신 요청
+		// 실패하면 이 세션은 pending recv 가 없는 상태로 남아 통신이 조용히 멈추므로
+		// 그대로 방치하지 않고 연결을 정리한다.
+		if (!clientSession->PostReceive())
+		{
+			LOGE("session %u failed to re-arm recv, disconnecting instead of going silent",
+				clientSession->GetSessionID());
+			disconnectAfterHandling = true;
+		}
+	}
+
+	// 이 핸들러가 세션 사용을 끝냈으므로 이제 카운트를 내려놓는다.
+	clientSession->DecrementIO();
+
+	if (disconnectAfterHandling)
+	{
+		OnDisconnectRequest(clientSession);
 	}
 }
 
@@ -517,19 +571,22 @@ void IOCPClient::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD
 	if (!overlappedEx)
 		return;
 
-	ClientSession* clientSession = dynamic_cast<ClientSession*>(session);
+	ClientSession* clientSession = static_cast<ClientSession*>(session);
 
 	if (clientSession->GetSessionRole() != SESSION_ROLE::CLIENT)
 	{
-		LOGE("send completion arrived for a session whose role is not CLIENT");
+		ENGINE_VIOLATION("session %u send completion arrived but the role is %d, not CLIENT",
+			clientSession->GetSessionID(), static_cast<int>(clientSession->GetSessionRole()));
 
-		__debugbreak();
+		// 카운트를 반드시 내려놓아야 한다. 그러지 않으면 취소 대기가 풀리지 않는다.
+		clientSession->DecrementIO();
 		return;
 	}
 
-	clientSession->DecrementIO();
+	// OnSendCompleted 가 다음 패킷의 WSASend 까지 발행하므로 처리 후에 내린다.
+	clientSession->OnSendCompleted(bytesTransferred);
 
-	bool bResult = clientSession->OnSendCompleted(bytesTransferred);
+	clientSession->DecrementIO();
 }
 
 void IOCPClient::HandleSendCancelled(OverlappedEx* overlappedEx, ISession* session)
@@ -550,24 +607,18 @@ void IOCPClient::HandleSessionDisconnected(OverlappedEx* overlappedEx, ISession*
 {
 	// 세션의 정상 종료 시퀀스
 
-	if (session == nullptr || overlappedEx == nullptr)
-	{
-		__debugbreak();
-		return;
-	}
+	ENGINE_CHECK_RETVOID(session != nullptr && overlappedEx != nullptr,
+		"disconnect handler called with session %p overlapped %p", session, overlappedEx);
 
 	if (overlappedEx->operation == IO_OPERATION::RECV)
 	{
 		OnDisconnectRequest(session);
 	}
-	else if (overlappedEx->operation == IO_OPERATION::SEND)
-	{
-		__debugbreak();
-
-	}
 	else
 	{
-		__debugbreak();
+		// 0바이트 완료는 RECV 에서만 발생한다.
+		ENGINE_VIOLATION("session %u reported a zero byte completion on io %d, which should only happen for RECV",
+			session->GetSessionID(), static_cast<int>(overlappedEx->operation));
 	}
 }
 
@@ -647,14 +698,14 @@ bool IOCPClient::PrepareConnect()
 	if (!m_session)
 	{
 		//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to acquire session");
-		__debugbreak();
+		ENGINE_BREAK_IF_DEBUGGER();
 		return false;
 	}
 
 	if (m_session->GetClientSessionState() != ClientSessionState::CONNECT_READY)
 	{
 		//Log::log(LogLevel::LOG_ERROR, "[%s] Session is not Ready");
-		__debugbreak();
+		ENGINE_BREAK_IF_DEBUGGER();
 		return false;
 	}
 
@@ -685,13 +736,13 @@ bool IOCPClient::PostConnect(ISession* session)
 
 	if (nResult == 0)
 	{
-		// 유효한 IPv4 점선 10진수 문자열 또는 유효한 IPv6 주소 문자열이 아닌 문자열을 가리키는 경우
-		__debugbreak();
+		ENGINE_VIOLATION("server address '%s' is not a valid IPv4 address", m_serverIPAddress);
+		return false;
 	}
 	else if (nResult == -1)
 	{
 		int nError = ::WSAGetLastError();
-		__debugbreak();
+		ENGINE_BREAK_IF_DEBUGGER();
 	}
 
 	// GQCS 사용을 위한 IOCP 등록
@@ -757,13 +808,15 @@ void IOCPClient::OnDisconnectRequest(ISession* session)
 		// Connect, Recv, Send IO 를 모두 취소하고
 		if (!clientSession->CancelPendingIO())
 		{
-			__debugbreak();
+			ENGINE_VIOLATION("session %u CancelPendingIO failed during disconnect", clientSession->GetSessionID());
 		}
 
 		// 취소가 완료되기를 기다린다.
 		if (!clientSession->WaitForIOCancelComplete(10'000))
 		{
-			__debugbreak();
+			// 취소가 끝나지 않았는데도 아래에서 소켓을 닫는다.
+			// 남은 완료 통지가 닫힌 소켓을 참조할 수 있다.
+			ENGINE_VIOLATION("session %u IO cancel did not complete, closing the socket anyway", clientSession->GetSessionID());
 		}
 
 		// 모든 IO 취소가 성공적으로 수행되었으면
@@ -774,7 +827,7 @@ void IOCPClient::OnDisconnectRequest(ISession* session)
 	// 소켓을 닫은 이후 세션에 대한 상태 및 정리를 수행
 	if (!clientSession->OnDisconnect())
 	{
-		__debugbreak();
+		ENGINE_VIOLATION("session %u OnDisconnect reported failure", clientSession->GetSessionID());
 	}
 }
 

@@ -2,6 +2,8 @@
 
 #include <stdio.h>
 
+#include "../Diagnostics/EngineAssert.h"
+
 #include <new>
 
 #include "../../Core/Util/Logger.h"
@@ -76,7 +78,7 @@ void SlabMemoryPool::Finalize()
 	if (!allMemoryReleased)
 	{
 		LOGE("finalize with unreleased blocks. see the slab stats logged above (OUTSTANDING)");
-		__debugbreak();
+		ENGINE_BREAK_IF_DEBUGGER();
 	}
 
 	for (uint32_t i = 0; i < m_slabCount; ++i)
@@ -261,7 +263,7 @@ void SlabMemoryPool::Release(const void* payload)
 	if (header->magic != HEADER_MAGIC) {
 		LOGE("block header corrupted : payload %p, magic 0x%08X (expected 0x%08X). double free or overrun",
 			payload, header->magic, HEADER_MAGIC);
-		__debugbreak(); // 메모리 훼손 발생!
+		ENGINE_BREAK_IF_DEBUGGER(); // 메모리 훼손 발생!
 		return;
 	}
 
@@ -270,7 +272,7 @@ void SlabMemoryPool::Release(const void* payload)
 	{
 		LOGE("block header has invalid slab index %u (slab count %u) : payload %p",
 			slabIndex, m_slabCount, payload);
-		__debugbreak();
+		ENGINE_BREAK_IF_DEBUGGER();
 		return;
 	}
 
@@ -283,7 +285,7 @@ void SlabMemoryPool::Release(const void* payload)
 		// 반환된 적 없는 블록을 다시 반환하고 있다.
 		::ReleaseSRWLockExclusive(&slab.lock);
 		LOGE("slab %u released more blocks than were acquired : payload %p (double free)", slabIndex, payload);
-		__debugbreak();
+		ENGINE_BREAK_IF_DEBUGGER();
 		return;
 	}
 

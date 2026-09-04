@@ -1,6 +1,8 @@
 ﻿#include "ClientSessionPool.h"
 
 #include "ClientSession.h"
+
+#include "../Diagnostics/EngineAssert.h"
 #include "SessionNode.h"
 
 #include "../../Core/Sync/SRWLockGuard.h"
@@ -25,13 +27,13 @@ ClientSessionPool::ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hy
 	{
 		if (!m_sessions[i].Initialize(SESSION_ROLE::SERVER, i))
 		{
-			__debugbreak();
+			ENGINE_VIOLATION("failed to initialize client session %u of %u", i, m_capacity);
 			return;
 		}
 
 		if (!m_sessions[i].InitializeMemoryPool(hybridSendPacketPool, jobMemoryPool, packetMemoryPool, generalMemoryPool))
 		{
-			__debugbreak();
+			ENGINE_VIOLATION("failed to bind memory pools to client session %u of %u", i, m_capacity);
 			return;
 		}
 
@@ -82,12 +84,9 @@ ISession* ClientSessionPool::Acquire()
 
 void ClientSessionPool::Release(ISession* session)
 {
-	ClientSession* clientSession = dynamic_cast<ClientSession*>(session);
-	if (!clientSession)
-	{
-		__debugbreak();
-		return;
-	}
+	// 이 풀은 ClientSession 만 담으므로 RTTI 조회가 필요하지 않다.
+	ClientSession* clientSession = static_cast<ClientSession*>(session);
+	ENGINE_CHECK_RETVOID(clientSession != nullptr, "Release called with a null session");
 
 	const uint32_t sessionId = clientSession->GetSessionID();
 
@@ -120,12 +119,14 @@ void ClientSessionPool::Release(ISession* session)
 	{
 		if (!clientSession->CancelPendingIO())
 		{
-			__debugbreak();
+			ENGINE_VIOLATION("session %u CancelPendingIO failed during release", sessionId);
 		}
 
 		if (!clientSession->WaitForIOCancelComplete(10'000))
 		{
-			__debugbreak();
+			// 취소가 완료되지 않았는데도 아래에서 세션을 리셋하고 풀에 반납한다.
+			// 남은 완료 통지가 회수된 세션을 만질 수 있다.
+			ENGINE_VIOLATION("session %u IO cancel did not complete, releasing it anyway", sessionId);
 		}
 	}
 
@@ -136,7 +137,7 @@ void ClientSessionPool::Release(ISession* session)
 
 	if (!clientSession->OnDisconnect())
 	{
-		__debugbreak();
+		ENGINE_VIOLATION("session %u OnDisconnect reported failure during release", sessionId);
 	}
 
 	clientSession->ResetSession();
@@ -182,7 +183,7 @@ void ClientSessionPool::RequestAllRecvSendIOCancel()
 		{
 			if (!session->CancelPendingIO())
 			{
-				__debugbreak();
+				ENGINE_VIOLATION("session %u CancelPendingIO failed during bulk cancel", session->GetSessionID());
 			}
 		}
 	}
@@ -201,7 +202,7 @@ bool ClientSessionPool::WaitForAllRecvSendIOCancelComplete(const uint32_t timeou
 		{
 			if (!session->WaitForIOCancelComplete(timeout_ms))
 			{
-				__debugbreak();
+				ENGINE_VIOLATION("session %u IO cancel did not complete within %u ms", session->GetSessionID(), timeout_ms);
 				return false;
 			}
 		}
@@ -228,7 +229,7 @@ void ClientSessionPool::DisconnectAllSessions()
 
 			if (!session->OnDisconnect())
 			{
-				__debugbreak();
+				ENGINE_VIOLATION("session %u OnDisconnect reported failure", session->GetSessionID());
 			}
 
 			session->ResetSession();

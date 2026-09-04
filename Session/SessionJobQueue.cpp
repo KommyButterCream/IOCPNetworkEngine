@@ -1,6 +1,10 @@
 ﻿#include "SessionJobQueue.h"
 
 #include "ISession.h"
+
+#include "../Diagnostics/EngineAssert.h"
+
+using namespace Core::Util;
 #include "SessionDefs.h"
 
 #include "../Job/Job.h"
@@ -55,7 +59,8 @@ bool SessionJobQueue::DequeueJob(Job*& outJob)
 {
 	if (m_sessionRole != SESSION_ROLE::SERVER)
 	{
-		__debugbreak();
+		// DequeueJob 은 서버 역할 전용이다. 클라이언트 역할은 WaitDequeueJob 을 쓴다.
+		ENGINE_VIOLATION("DequeueJob called on a session whose role is %d, not SERVER", static_cast<int>(m_sessionRole));
 	}
 
 	::AcquireSRWLockExclusive(&m_srwLock);
@@ -94,7 +99,8 @@ bool SessionJobQueue::WaitDequeueJob(Job*& outJob)
 {
 	if (m_sessionRole != SESSION_ROLE::CLIENT)
 	{
-		__debugbreak();
+		// WaitDequeueJob 은 클라이언트 역할 전용이다. 서버 역할은 DequeueJob 을 쓴다.
+		ENGINE_VIOLATION("WaitDequeueJob called on a session whose role is %d, not CLIENT", static_cast<int>(m_sessionRole));
 	}
 
 	::AcquireSRWLockExclusive(&m_srwLock);

@@ -2,6 +2,8 @@
 
 #include "SessionDefs.h"
 
+#include "../Diagnostics/EngineAssert.h"
+
 #include "../../Core/Util/Logger.h"
 
 using namespace Core::Util;
@@ -42,11 +44,26 @@ void BaseSession::ResetSession()
 
 	if (m_clientSocket != INVALID_SOCKET)
 	{
-		__debugbreak();
+		ENGINE_VIOLATION("session %u reset with a live socket %d. it was not detached",
+			GetSessionID(), static_cast<int>(m_clientSocket));
+	}
+
+	// IO 카운트는 여기서 강제로 0 으로 만들지 않는다.
+	//
+	// 이전에는 InterlockedExchange(&m_ioCount, 0) 였다. 그런데 이 시점에
+	// 다른 스레드의 완료 처리가 아직 돌고 있으면, 그 스레드의 DecrementIO 가
+	// 0 에서 하나 더 내려가 -1 이 되고 단정에 걸렸다. 실제로 관측된 현상이다.
+	//
+	// 카운트를 그대로 두면 늦게 도착한 DecrementIO 가 정상적으로 0 으로 내려간다.
+	// 0 이 아닌 상태로 여기 도달한 것 자체가 버그이므로 크게 남긴다.
+	const LONG remainingIo = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
+	if (remainingIo != 0)
+	{
+		ENGINE_VIOLATION("session %u reset while %ld IO operations are still outstanding. the counter is left as is so a late DecrementIO does not go negative",
+			GetSessionID(), remainingIo);
 	}
 
 	::InterlockedExchange(&m_closing, 0);
-	::InterlockedExchange(&m_ioCount, 0);
 	::InterlockedExchange(&m_cancelIo, 0);
 
 	if (m_ioCancelCompleteEvent)
@@ -62,10 +79,15 @@ void BaseSession::Finalize()
 		return;
 	}
 
-	LONG remainingIo = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
+	// 종료 시점에는 IOCP 가 이미 멈춰 있을 수 있고, 그때 큐에 남아 있던 완료
+	// 통지는 버려진다. 그러면 그 몫의 DecrementIO 가 영영 실행되지 않아
+	// 카운트가 0 이 아닌 상태로 여기 도달한다.
+	// 종료 경로이므로 치명적이지 않다. 남기고 계속 진행한다.
+	const LONG remainingIo = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
 	if (remainingIo != 0)
 	{
-		__debugbreak();
+		ENGINE_VIOLATION("session %u finalized while %ld IO operations are still outstanding. completions were most likely dropped when the IOCP stopped",
+			GetSessionID(), remainingIo);
 	}
 
 	m_clientSessionState = ClientSessionState::NONE;
@@ -74,7 +96,8 @@ void BaseSession::Finalize()
 
 	if (m_clientSocket != INVALID_SOCKET)
 	{
-		__debugbreak();
+		ENGINE_VIOLATION("session %u finalized with a live socket %d. it was not detached",
+			GetSessionID(), static_cast<int>(m_clientSocket));
 	}
 
 	::InterlockedExchange(&m_closing, 0);
@@ -157,12 +180,11 @@ void BaseSession::DecrementIO()
 
 	if (ioCount < 0)
 	{
-		// 카운터가 음수로 내려갔다.
-		// ResetSession / Finalize 가 카운터를 강제로 0 으로 만드는 동안
-		// 다른 스레드의 완료 처리가 아직 돌고 있었다는 뜻이다.
-		LOGE("session %u IO count went negative (%ld). the counter was reset while a handler was still running",
+		// IncrementIO 없이 DecrementIO 가 불렸거나, 카운터가 외부에서 리셋됐다.
+		// ResetSession 이 더 이상 카운터를 강제로 0 으로 만들지 않으므로
+		// 이제 이 로그가 뜨면 Increment/Decrement 짝이 실제로 맞지 않는다는 뜻이다.
+		ENGINE_VIOLATION("session %u IO count went negative (%ld). an Increment/Decrement pair is unbalanced",
 			GetSessionID(), ioCount);
-		__debugbreak();
 	}
 
 	if (::InterlockedCompareExchange(&m_cancelIo, 0, 0) == 1 && ioCount == 0 && m_ioCancelCompleteEvent)
@@ -187,16 +209,33 @@ bool BaseSession::CancelPendingIO()
 
 				if (errorCode == ERROR_NOT_FOUND || errorCode == ERROR_INVALID_HANDLE)
 				{
-					if ((GetSessionRole() == SESSION_ROLE::CLIENT || GetSessionRole() == SESSION_ROLE::SERVER) && m_ioCancelCompleteEvent)
+					// CancelIoEx 가 취소할 대상을 찾지 못했다.
+					//
+					// 이전 코드는 여기서 IO 카운트를 보지 않고 무조건 완료 이벤트를
+					// 세웠다. 그러면 실제로는 완료 통지를 기다리는 I/O 가 남아 있는데도
+					// WaitForIOCancelComplete 가 즉시 통과해서, 호출부가 아직 사용 중인
+					// 세션을 리셋하고 풀로 반납했다. 대기 자체가 무의미했다.
+					//
+					// 카운트가 0 일 때만 세운다. 0 이 아니면 남은 완료 통지가 도착해
+					// DecrementIO 가 0 으로 내릴 때 그쪽에서 이벤트를 세운다.
+					const LONG outstanding = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
+
+					if (outstanding == 0)
 					{
-						::SetEvent(m_ioCancelCompleteEvent);
+						if (m_ioCancelCompleteEvent)
+						{
+							::SetEvent(m_ioCancelCompleteEvent);
+						}
+
+						LOGI("session %u CancelIoEx found no pending IO and the count is zero (error %lu)",
+							GetSessionID(), errorCode);
+					}
+					else
+					{
+						LOGW("session %u CancelIoEx found nothing to cancel but %ld IO operations are still counted. waiting for their completions",
+							GetSessionID(), outstanding);
 					}
 
-					// 주의: 여기서 IO 카운트를 확인하지 않고 완료 이벤트를 세운다.
-					// CancelIoEx 가 대상을 못 찾았을 뿐 실제로는 완료 대기 중인
-					// I/O 가 남아 있을 수 있으므로 카운트도 같이 남긴다.
-					LOGI("session %u CancelIoEx found no pending IO (error %lu, io count %ld)",
-						GetSessionID(), errorCode, ::InterlockedCompareExchange(&m_ioCount, 0, 0));
 					return true;
 				}
 				else if (errorCode == ERROR_OPERATION_ABORTED)
@@ -254,7 +293,7 @@ bool BaseSession::OnDisconnect()
 			// 소켓은 반드시 DetachSocket 으로 먼저 떼어낸 뒤 여기 와야 한다.
 			LOGE("session %u disconnecting with a live socket %d. it was not detached",
 				GetSessionID(), static_cast<int>(m_clientSocket));
-			__debugbreak();
+			ENGINE_BREAK_IF_DEBUGGER();
 		}
 
 		switch (m_sessionRole)
@@ -282,7 +321,10 @@ void BaseSession::AttachSocket(SOCKET socket)
 {
 	if (m_clientSocket != INVALID_SOCKET)
 	{
-		__debugbreak();
+		// 이미 소켓을 들고 있는 세션에 다시 붙이려 한다.
+		// 사용 중인 세션이 풀에서 다시 배포되면 이 경로로 온다.
+		ENGINE_VIOLATION("session %u already holds socket %d, cannot attach socket %d. the session was handed out while still in use",
+			GetSessionID(), static_cast<int>(m_clientSocket), static_cast<int>(socket));
 	}
 
 	m_clientSocket = socket;
