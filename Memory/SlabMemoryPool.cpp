@@ -4,6 +4,10 @@
 
 #include <new>
 
+#include "../../Core/Util/Logger.h"
+
+using namespace Core::Util;
+
 SlabMemoryPool::SlabMemoryPool()
 {
 }
@@ -63,10 +67,15 @@ void SlabMemoryPool::Finalize()
 {
 	if (!m_initialized) return;
 
+	// 종료 시 슬랩 지표를 남긴다.
+	// 누수가 있을 때 "어느 슬랩에 몇 개가 남았는지" 가 여기서 드러난다.
+	LogStats("finalize");
+
 	// 모든 메모리가 반환되었는지 확인 (디버그용)
 	bool allMemoryReleased = VerifyAllMemoryReleased();
 	if (!allMemoryReleased)
 	{
+		LOGE("finalize with unreleased blocks. see the slab stats logged above (OUTSTANDING)");
 		__debugbreak();
 	}
 
@@ -172,10 +181,18 @@ void* SlabMemoryPool::Acquire(size_t size)
 	if (!m_initialized || size == 0) return nullptr;
 
 	uint32_t slabIndex = FindSlabIndex(size);
-	if (slabIndex == UINT32_MAX) return nullptr;
+	if (slabIndex == UINT32_MAX)
+	{
+		// 어떤 슬랩보다도 큰 요청. 지금까지는 조용히 nullptr 만 반환해서
+		// 호출부에서 원인을 알 수 없었다.
+		LOGE("no slab can serve %zu bytes (largest slab blockSize is %u)",
+			size, m_slabCount ? m_slabs[m_slabCount - 1].blockSize : 0);
+		return nullptr;
+	}
 
 	Slab& slab = m_slabs[slabIndex];
 	BlockHeader* header = nullptr;
+	bool grewThisCall = false;
 
 	::AcquireSRWLockExclusive(&slab.lock);
 
@@ -185,9 +202,19 @@ void* SlabMemoryPool::Acquire(size_t size)
 		// 실제 운영 환경에서는 초기 blockCount 를 충분히 크게 잡아 이 경로를 피하는 것이 좋다.
 		if (!AllocateExtraBlocks(slab, slab.blockCount))
 		{
+			slab.acquireFailCount++;
+			const uint32_t failCount = slab.acquireFailCount;
+			const uint32_t blockSize = slab.blockSize;
 			::ReleaseSRWLockExclusive(&slab.lock);
+
+			// 풀 확장 실패는 곧 패킷 유실이므로 반드시 남긴다.
+			LOGE("slab %u (blockSize %u) exhausted and could not grow (fail count %u)",
+				slabIndex, blockSize, failCount);
 			return nullptr;
 		}
+
+		slab.growthCount++;
+		grewThisCall = true;
 	}
 
 	header = slab.freeList;
@@ -195,9 +222,25 @@ void* SlabMemoryPool::Acquire(size_t size)
 	{
 		slab.freeList = header->next;
 		slab.allocatedCount++;
+		slab.totalAcquire++;
+		if (slab.allocatedCount > slab.peakAllocated) slab.peakAllocated = slab.allocatedCount;
 	}
 
+	// 락 밖에서 로그를 남기기 위해 필요한 값만 복사한다.
+	const uint32_t growthCount = slab.growthCount;
+	const uint32_t totalBlocks = slab.blockCount * (slab.extraMemoryCount + 1);
+	const uint32_t peakAllocated = slab.peakAllocated;
+	const uint32_t blockSizeForLog = slab.blockSize;
+
 	::ReleaseSRWLockExclusive(&slab.lock);
+
+	if (grewThisCall)
+	{
+		// 초기 blockCount 가 부족했다는 신호. 튜닝 근거로 남긴다.
+		// 로거가 자체 락을 쓰므로 슬랩 락을 놓은 뒤에 남긴다.
+		LOGW("slab %u (blockSize %u) grew at runtime : growth %u, blocks now %u, peak %u",
+			slabIndex, blockSizeForLog, growthCount, totalBlocks, peakAllocated);
+	}
 
 	if (!header) return nullptr;
 
@@ -216,16 +259,86 @@ void SlabMemoryPool::Release(const void* payload)
 
 	// 매직 넘버 체크 (헤더 훼손 여부 확인)
 	if (header->magic != HEADER_MAGIC) {
+		LOGE("block header corrupted : payload %p, magic 0x%08X (expected 0x%08X). double free or overrun",
+			payload, header->magic, HEADER_MAGIC);
 		__debugbreak(); // 메모리 훼손 발생!
 		return;
 	}
 
 	uint32_t slabIndex = header->bucketIndex;
+	if (slabIndex >= m_slabCount)
+	{
+		LOGE("block header has invalid slab index %u (slab count %u) : payload %p",
+			slabIndex, m_slabCount, payload);
+		__debugbreak();
+		return;
+	}
+
 	Slab& slab = m_slabs[slabIndex];
 
 	::AcquireSRWLockExclusive(&slab.lock);
+
+	if (slab.allocatedCount == 0)
+	{
+		// 반환된 적 없는 블록을 다시 반환하고 있다.
+		::ReleaseSRWLockExclusive(&slab.lock);
+		LOGE("slab %u released more blocks than were acquired : payload %p (double free)", slabIndex, payload);
+		__debugbreak();
+		return;
+	}
+
 	header->next = slab.freeList;
 	slab.freeList = header;
 	slab.allocatedCount--;
+	slab.totalRelease++;
 	::ReleaseSRWLockExclusive(&slab.lock);
+}
+
+bool SlabMemoryPool::GetSlabStats(uint32_t slabIndex, SlabStats& outStats) const
+{
+	if (!m_initialized || slabIndex >= m_slabCount) return false;
+
+	Slab& slab = m_slabs[slabIndex];
+
+	::AcquireSRWLockShared(&slab.lock);
+	outStats.blockSize = slab.blockSize;
+	outStats.blockCount = slab.blockCount;
+	outStats.allocatedCount = slab.allocatedCount;
+	outStats.peakAllocated = slab.peakAllocated;
+	outStats.growthCount = slab.growthCount;
+	outStats.acquireFailCount = slab.acquireFailCount;
+	outStats.totalAcquire = slab.totalAcquire;
+	outStats.totalRelease = slab.totalRelease;
+	::ReleaseSRWLockShared(&slab.lock);
+
+	return true;
+}
+
+void SlabMemoryPool::LogStats(const char* poolName) const
+{
+	if (!m_initialized) return;
+
+	const char* name = poolName ? poolName : "pool";
+
+	for (uint32_t i = 0; i < m_slabCount; ++i)
+	{
+		SlabStats stats;
+		if (!GetSlabStats(i, stats)) continue;
+
+		const uint64_t outstanding = stats.totalAcquire - stats.totalRelease;
+
+		// 미반환 블록이 있으면 경고 레벨로 올려서 눈에 띄게 한다.
+		if (outstanding != 0 || stats.acquireFailCount != 0)
+		{
+			LOGW("[%s] slab %u size %-7u | inUse %-6u peak %-6u / blocks %-6u | acquire %-10llu release %-10llu OUTSTANDING %llu | grow %u fail %u",
+				name, i, stats.blockSize, stats.allocatedCount, stats.peakAllocated, stats.blockCount,
+				stats.totalAcquire, stats.totalRelease, outstanding, stats.growthCount, stats.acquireFailCount);
+		}
+		else if (stats.totalAcquire != 0)
+		{
+			LOGI("[%s] slab %u size %-7u | peak %-6u / blocks %-6u | acquire %-10llu release %-10llu | grow %u",
+				name, i, stats.blockSize, stats.peakAllocated, stats.blockCount,
+				stats.totalAcquire, stats.totalRelease, stats.growthCount);
+		}
+	}
 }

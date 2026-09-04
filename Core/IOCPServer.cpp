@@ -277,6 +277,13 @@ void IOCPServer::StopServer()
 		m_hybridSendPacketPool = nullptr;
 	}
 
+	// 풀 지표를 남긴다.
+	// peak 은 초기 blockCount 산정 근거이고, grow 가 0 이 아니면 초기값이 부족했다는 뜻이며
+	// OUTSTANDING 이 0 이 아니면 누수다. 개별 할당 로그 없이 이걸로 판단한다.
+	if (m_jobMemoryPool)     m_jobMemoryPool->LogStats("job");
+	if (m_packetMemoryPool)  m_packetMemoryPool->LogStats("packet");
+	if (m_generalMemoryPool) m_generalMemoryPool->LogStats("general");
+
 	if (m_jobMemoryPool)
 	{
 		delete m_jobMemoryPool;
@@ -294,6 +301,8 @@ void IOCPServer::StopServer()
 		delete m_generalMemoryPool;
 		m_generalMemoryPool = nullptr;
 	}
+
+	Logger::Flush();
 }
 
 void IOCPServer::HandleCompletion(
@@ -705,7 +714,9 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 
 	if (!recvBuf.CommitWrite(bytesTransferred))
 	{
-		printf_s("[Error] CommitWrite failed! Buffer overflow\n");
+		LOGE("session %u recv ring commit failed : %lu bytes would overflow (stored %u / capacity %u)",
+			clientSession->GetSessionID(), bytesTransferred,
+			recvBuf.GetStoredSize(), RECV_PACKET_BUFFER_SIZE);
 		__debugbreak();
 		return;
 	}
@@ -725,6 +736,11 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 
 		if (!IsValidPacketId(packetId))
 		{
+			// 외부 입력으로 트리거 가능한 검증 실패다.
+			// 현재는 여기서 멈추지 않고 그대로 디스패치까지 진행하므로
+			// (릴리스에서는 __debugbreak 로 프로세스가 죽는다) 근거를 남긴다.
+			LOGE("session %u received an invalid packet id %u (size %u)",
+				clientSession->GetSessionID(), packetId, packetSize);
 			__debugbreak();
 		}
 
@@ -755,7 +771,13 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 	}
 
 	// 다시 다음 수신 요청
-	bool bResult = clientSession->PostReceive();
+	// 실패하면 이 세션은 pending recv 가 없는 상태로 남는다.
+	// 즉 하트비트 타임아웃까지 슬롯만 차지하는 좀비가 되므로 반드시 남긴다.
+	if (!clientSession->PostReceive())
+	{
+		LOGE("session %u failed to re-arm recv. the session now has no pending IO and will linger until the heartbeat sweep",
+			clientSession->GetSessionID());
+	}
 }
 
 void IOCPServer::HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* session)
@@ -768,7 +790,7 @@ void IOCPServer::HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* sessi
 
 	session->DecrementIO();
 
-	printf_s("[IOCPServer] :: [Session ID : %d] Recv Cancelled.\n", session->GetSessionID());
+	LOGI("session %u recv cancelled", session->GetSessionID());
 }
 
 void IOCPServer::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)
@@ -804,7 +826,7 @@ void IOCPServer::HandleSendCancelled(OverlappedEx* overlappedEx, ISession* sessi
 
 	session->DecrementIO();
 
-	printf_s("[IOCPServer] :: [Session ID : %d] Send Cancelled.\n", session->GetSessionID());
+	LOGI("session %u send cancelled", session->GetSessionID());
 }
 
 void IOCPServer::HandleSessionDisconnected(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)

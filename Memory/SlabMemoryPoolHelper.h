@@ -9,11 +9,19 @@
 #include "../Protocol/PacketID.h"
 
 #include <new>
-#include <utility>
-
-#include <stdio.h> // for printf_s
 
 using namespace Core::Util;
+
+// 주의
+// 이 파일의 함수들은 패킷/Job 하나당 호출된다.
+// 즉 초당 수십만~수백만 번 실행되는 경로이므로 여기에 로그를 남기면
+// 그것만으로 처리량이 한 자리 수로 떨어진다.
+// (실측: 로그 억제 221k pkt/s -> 로그 켜짐 13k pkt/s)
+//
+// 그래서 개별 할당/해제는 LOGT(릴리스에서 컴파일 제거) 로만 남기고,
+// 실제 운영 지표는 SlabMemoryPool 이 누적하는 카운터로 본다.
+//   SlabMemoryPool::LogStats() -> 슬랩별 peak / 확장 횟수 / 미반환 수
+// 실패 원인 로그도 SlabMemoryPool::Acquire 안에서 남긴다.
 
 namespace MEMORY_POOL
 {
@@ -21,43 +29,22 @@ namespace MEMORY_POOL
 
 	inline void* CreatePacket(SlabMemoryPool& pool, size_t size)
 	{
-		// 오브젝트 생성
 		// 메모리 풀에서 크기에 맞는 메모리를 찾아서 반환
-
 		void* memory = pool.Acquire(size);
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s] Create Packet : %p", __FUNCTION__, memory);
-
-		if (!memory)
-			return nullptr;
+		LOGT("packet acquire %p size %zu", memory, size);
 
 		return memory;
 	}
 
 	inline void ReleasePacket(SlabMemoryPool& packetPool, SlabMemoryPool& generalPool, const void* memory)
 	{
-		// 오브젝트 해제
 		// 사용이 끝난 메모리를 메모리풀에 반환
 		if (!memory)
 			return;
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s] Release Packet : %p", __FUNCTION__, memory);
+		LOGT("packet release %p", memory);
 
-
-		//PACKET_HEADER* header = reinterpret_cast<PACKET_HEADER*>(memory);
-
-		//switch (header->packetId)
-		//{
-		//case ToPacketID(PACKET_ID::SERVICE_BEGIN):
-		//{
-		//	auto* userPacket = reinterpret_cast<INFERENCE_IMAGE_PACKET_REQUEST*>(memory);
-		//	if (userPacket->pImageBuffer)
-		//		generalPool.Release(userPacket->pImageBuffer);
-		//	break;
-		//}
-		//}
-
-		// 사용이 끝난 메모리를 메모리풀에 반환
 		packetPool.Release(memory);
 	}
 
@@ -66,17 +53,16 @@ namespace MEMORY_POOL
 	inline Job* CreateJob(SlabMemoryPool& pool)
 	{
 		// Job 메모리 버퍼를 버퍼풀로부터 반환
-
 		void* memory = pool.Acquire(sizeof(Job));
 
 		if (!memory)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s] Create Job Failed", __FUNCTION__);
-
+			// 실패의 구체적 원인(슬랩 고갈 / 크기 초과)은 Acquire 가 남긴다.
+			LOGE("failed to acquire a Job block (size %zu)", sizeof(Job));
 			return nullptr;
 		}
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s] Create Job : %p", __FUNCTION__, memory);
+		LOGT("job acquire %p", memory);
 
 		return static_cast<Job*>(memory);
 	}
@@ -86,14 +72,12 @@ namespace MEMORY_POOL
 		// 사용이 끝난 Job 메모리 버퍼를 버퍼풀에 반환
 		if (!job)
 		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s] Invalid Job", __FUNCTION__);
-
+			LOGE("ReleaseJob called with nullptr");
 			return;
 		}
 
-		Logger::Log(LogLevel::LOG_INFO, "[%s] Release Job : %p", __FUNCTION__, job);
+		LOGT("job release %p", job);
 
-		// 사용이 끝난 메모리를 메모리풀에 반환
 		pool.Release(static_cast<const void*>(job));
 	}
 }

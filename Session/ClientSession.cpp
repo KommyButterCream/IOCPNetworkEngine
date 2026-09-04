@@ -445,7 +445,8 @@ SessionJobQueue& ClientSession::GetJobQueue() const
 
 bool ClientSession::PostReceive()
 {
-	Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d] Receive 시작", __FUNCTION__, GetSessionID());
+	// 수신 1건당 호출되는 핫패스. 릴리스에서는 컴파일 제거된다.
+	LOGT("session %u post recv", GetSessionID());
 
 	if (!IsTransportConnected())
 	{
@@ -618,7 +619,8 @@ bool ClientSession::PostCurrentSend()
 
 bool ClientSession::OnSendCompleted(const DWORD bytesTransferred)
 {
-	Logger::Log(LogLevel::LOG_INFO, "[%s][ClientSession : %d] Send 완료", __FUNCTION__, GetSessionID());
+	// 송신 완료 1건당 호출되는 핫패스. 릴리스에서는 컴파일 제거된다.
+	LOGT("session %u send completed %lu bytes", GetSessionID(), bytesTransferred);
 
 	// 부분 전송 처리
 	m_sendOffset += bytesTransferred;

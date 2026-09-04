@@ -43,7 +43,7 @@ void IOCPCore::Stop()
 	if (::InterlockedCompareExchange(&m_destroyFlag, 1, 0) == 1)
 		return;
 
-	printf_s("%s\n", __FUNCTION__);
+	LOGI("IOCP core shutting down");
 
 	RequestIOCPThreadTerminate();
 	DestroyIOCPWorkerthread();
@@ -54,6 +54,43 @@ void IOCPCore::Stop()
 HANDLE IOCPCore::GetIOCPHandle() const noexcept
 {
 	return m_iocpHandle;
+}
+
+void IOCPCore::SetEngineLogLevel(int level)
+{
+	if (level < static_cast<int>(LogLevel::LOG_DEBUG)) level = static_cast<int>(LogLevel::LOG_DEBUG);
+	if (level > static_cast<int>(LogLevel::LOG_NO_USE)) level = static_cast<int>(LogLevel::LOG_NO_USE);
+
+	Logger::SetLogLevel(static_cast<LogLevel>(level));
+}
+
+int IOCPCore::GetEngineLogLevel()
+{
+	return static_cast<int>(Logger::GetLogLevel());
+}
+
+bool IOCPCore::SetEngineLogFile(const char* filePath)
+{
+	return Logger::OpenFile(filePath);
+}
+
+void IOCPCore::FlushEngineLog()
+{
+	Logger::Flush();
+}
+
+// 공개 헤더의 상수와 Core 의 정의가 어긋나면 여기서 컴파일이 멈춘다.
+static_assert(static_cast<unsigned int>(ENGINE_LOG_SINK_CONSOLE) == static_cast<unsigned int>(Core::Util::LOG_SINK_CONSOLE), "EngineLogSink out of sync with Core::Util::LogSink");
+static_assert(static_cast<unsigned int>(ENGINE_LOG_SINK_FILE) == static_cast<unsigned int>(Core::Util::LOG_SINK_FILE), "EngineLogSink out of sync with Core::Util::LogSink");
+
+void IOCPCore::SetEngineLogSinks(unsigned int sinks)
+{
+	Logger::SetSinks(sinks);
+}
+
+unsigned int IOCPCore::GetEngineLogSinks()
+{
+	return Logger::GetSinks();
 }
 
 bool IOCPCore::InitializeWinsock()

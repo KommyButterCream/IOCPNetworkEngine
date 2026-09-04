@@ -37,6 +37,16 @@ class ISession;
 struct OverlappedEx;
 enum class IO_OPERATION;
 
+// 엔진 로그 출력 대상. 비트 조합 가능.
+// Core::Util::LogSink 와 값이 일치해야 하며 IOCPCore.cpp 에서 static_assert 로 검증한다.
+// 소비자가 Core 헤더를 include 하지 않고도 로그를 제어할 수 있도록 여기에 둔다.
+enum EngineLogSink : unsigned int
+{
+	ENGINE_LOG_SINK_NONE = 0,
+	ENGINE_LOG_SINK_CONSOLE = 1 << 0,
+	ENGINE_LOG_SINK_FILE = 1 << 1,
+};
+
 class IOCP_ENGINE_API IOCPCore
 {
 public:
@@ -48,6 +58,26 @@ public:
 	void Stop();
 
 	HANDLE GetIOCPHandle() const noexcept;
+
+	// --- 로그 제어 ---
+	//
+	// 주의: Core 는 정적 라이브러리이고 Logger 의 레벨은 inline static 이므로
+	// 엔진 DLL 안과 호스트 EXE 안에 각각 별도의 사본이 존재한다.
+	// 호스트에서 Logger::SetLogLevel 을 호출해도 DLL 쪽 로그는 바뀌지 않는다.
+	// 아래 함수들은 DLL 쪽 사본을 제어하기 위한 통로다.
+	// (호스트 자신의 로그는 호스트가 Logger::SetLogLevel 로 따로 조절한다)
+	static void SetEngineLogLevel(int level);
+	static int GetEngineLogLevel();
+
+	// 엔진 로그를 파일로 남긴다. 1MB 버퍼를 쓰고 ERROR 이상에서만 flush 하므로
+	// 콘솔 출력보다 훨씬 빠르다.
+	static bool SetEngineLogFile(const char* filePath);
+	static void FlushEngineLog();
+
+	// 출력 대상 지정. Core::Util::LOG_SINK_* 비트 조합을 넘긴다.
+	// 콘솔 쓰기가 파일보다 훨씬 느리므로 부하 상황에서는 파일만 켜는 것이 좋다.
+	static void SetEngineLogSinks(unsigned int sinks);
+	static unsigned int GetEngineLogSinks();
 
 protected:
 	// 서버, 클라이언트에서 override 필수!

@@ -165,7 +165,7 @@ void IOCPClient::StopClient()
 	if (::InterlockedCompareExchange(&m_destroyFlag, 1, 0) == 1)
 		return;
 
-	printf_s("%s\n", __FUNCTION__);
+	LOGI("client shutting down");
 
 	if (m_clientSessionScheduler)
 	{
@@ -431,7 +431,9 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 
 	if (!recvBuf.CommitWrite(bytesTransferred))
 	{
-		printf_s("[Error] CommitWrite failed! Buffer overflow\n");
+		LOGE("session %u recv ring commit failed : %lu bytes would overflow (stored %u / capacity %u)",
+			clientSession->GetSessionID(), bytesTransferred,
+			recvBuf.GetStoredSize(), RECV_PACKET_BUFFER_SIZE);
 		__debugbreak();
 		return;
 	}
@@ -451,6 +453,10 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 
 		if (!IsValidPacketId(packetId))
 		{
+			// 외부 입력으로 트리거 가능한 검증 실패다.
+			// 현재는 여기서 멈추지 않고 그대로 디스패치까지 진행한다.
+			LOGE("session %u received an invalid packet id %u (size %u)",
+				clientSession->GetSessionID(), packetId, packetSize);
 			__debugbreak();
 		}
 
@@ -481,7 +487,12 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 	}
 
 	// 다시 다음 수신 요청
-	bool bResult = clientSession->PostReceive();
+	// 실패하면 이 세션은 pending recv 가 없는 상태로 남아 통신이 조용히 멈춘다.
+	if (!clientSession->PostReceive())
+	{
+		LOGE("session %u failed to re-arm recv. the session now has no pending IO",
+			clientSession->GetSessionID());
+	}
 }
 
 void IOCPClient::HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* session)
@@ -495,7 +506,7 @@ void IOCPClient::HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* sessi
 	// 걸어 두었던 WSARecv 에 대한 IO 감소
 	session->DecrementIO();
 
-	printf_s("[IOCPClient] :: [Session ID : %d] Recv Cancelled.\n", session->GetSessionID());
+	LOGI("session %u recv cancelled", session->GetSessionID());
 }
 
 void IOCPClient::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)
@@ -532,7 +543,7 @@ void IOCPClient::HandleSendCancelled(OverlappedEx* overlappedEx, ISession* sessi
 	// 걸어 두었던 WSASend 에 대한 IO 감소
 	session->DecrementIO();
 
-	printf_s("[IOCPClient] :: [Session ID : %d] Send Cancelled.\n", session->GetSessionID());
+	LOGI("session %u send cancelled", session->GetSessionID());
 }
 
 void IOCPClient::HandleSessionDisconnected(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)

@@ -28,6 +28,24 @@ public:
 	// 매직 넘버: 메모리 해제 시 헤더 훼손 여부 검증용
 	static constexpr uint32_t HEADER_MAGIC = 0xDEADBEEF;
 
+	// 슬랩별 운영 지표.
+	// 할당/해제마다 로그를 찍는 대신 이 값들을 누적한다.
+	// 로그 한 줄보다 정보량이 많고 비용은 사실상 0 이다.
+	//   - peakAllocated : 동시 사용 최고치. 초기 blockCount 산정 근거
+	//   - growthCount   : 런타임 확장 횟수. 0 이 아니면 초기값이 부족했다는 뜻
+	//   - totalAcquire / totalRelease : 차이가 곧 미반환 블록 수
+	struct SlabStats
+	{
+		uint32_t blockSize = 0;
+		uint32_t blockCount = 0;
+		uint32_t allocatedCount = 0;
+		uint32_t peakAllocated = 0;
+		uint32_t growthCount = 0;
+		uint32_t acquireFailCount = 0;
+		uint64_t totalAcquire = 0;
+		uint64_t totalRelease = 0;
+	};
+
 public:
 	SlabMemoryPool();
 	~SlabMemoryPool();
@@ -38,6 +56,13 @@ public:
 
 	void* Acquire(size_t size);
 	void Release(const void* payload);
+
+	uint32_t GetSlabCount() const { return m_slabCount; }
+	bool GetSlabStats(uint32_t slabIndex, SlabStats& outStats) const;
+
+	// 전체 슬랩 지표를 로그로 한 번에 덤프한다.
+	// 종료 시점이나 주기적으로 호출해서 풀 사이징과 누수를 판단한다.
+	void LogStats(const char* poolName) const;
 
 private:
 	// Slab 메모리 풀의 링크드 리스트 노드
@@ -65,6 +90,13 @@ private:
 		void** extraMemoryBlocks = nullptr;
 		uint32_t extraMemoryCount = 0;
 		uint32_t extraMemoryCapacity = 0;
+
+		// 운영 지표. 모두 슬랩 락 보유 중에만 갱신하므로 별도 원자적 연산이 없다.
+		uint32_t peakAllocated = 0;
+		uint32_t growthCount = 0;
+		uint32_t acquireFailCount = 0;
+		uint64_t totalAcquire = 0;
+		uint64_t totalRelease = 0;
 
 		Slab()
 		{

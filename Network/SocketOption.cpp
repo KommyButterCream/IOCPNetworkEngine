@@ -2,8 +2,11 @@
 
 #include <WinSock2.h>
 #include <MSWSock.h> // for AcceptEX
-#include <stdio.h> // for printf_s
 #include <mstcpip.h> // for tcp_keepalive
+
+#include "../../Core/Util/Logger.h"
+
+using namespace Core::Util;
 
 #pragma comment(lib, "ws2_32.lib") // for WinSock2
 #pragma comment(lib, "mswsock.lib") // for AcceptEX / ConnectEx
@@ -17,7 +20,7 @@ bool SocketOption::SetResueAddress(SOCKET socket)
 
 	if (result == SOCKET_ERROR)
 	{
-		printf_s("setsockopt for SO_REUSEADDR failed with error : %u\n", ::WSAGetLastError());
+		LOGE("setsockopt for SO_REUSEADDR failed with error : %u", ::WSAGetLastError());
 		return false;
 	}
 
@@ -33,7 +36,7 @@ bool SocketOption::SetNoDelay(SOCKET socket)
 
 	if (result == SOCKET_ERROR)
 	{
-		printf_s("setsockopt for TCP_NODELAY failed with error : %u\n", ::WSAGetLastError());
+		LOGE("setsockopt for TCP_NODELAY failed with error : %u", ::WSAGetLastError());
 		return false;
 	}
 
@@ -50,7 +53,7 @@ bool SocketOption::SetKeepAlive(SOCKET socket)
 
 	if (result == SOCKET_ERROR)
 	{
-		printf_s("setsockopt for SO_KEEPALIVE failed with error : %u\n", ::WSAGetLastError());
+		LOGE("setsockopt for SO_KEEPALIVE failed with error : %u", ::WSAGetLastError());
 		return false;
 	}
 
@@ -62,7 +65,7 @@ bool SocketOption::SetKeepAliveEx(SOCKET socket, DWORD keepAliveTime_ms, DWORD k
 	BOOL option = TRUE;
 	if (::setsockopt(socket, SOL_SOCKET, SO_KEEPALIVE, (const char*)&option, sizeof(option)) == SOCKET_ERROR)
 	{
-		printf_s("SO_KEEPALIVE failed: %u\n", WSAGetLastError());
+		LOGE("SO_KEEPALIVE failed: %u", WSAGetLastError());
 		return false;
 	}
 
@@ -76,7 +79,7 @@ bool SocketOption::SetKeepAliveEx(SOCKET socket, DWORD keepAliveTime_ms, DWORD k
 		&alive, sizeof(alive),
 		nullptr, 0, &bytesReturned, nullptr, nullptr) == SOCKET_ERROR)
 	{
-		printf_s("SIO_KEEPALIVE_VALS failed: %u\n", WSAGetLastError());
+		LOGE("SIO_KEEPALIVE_VALS failed: %u", WSAGetLastError());
 		return false;
 	}
 
@@ -90,7 +93,7 @@ bool SocketOption::SetReceiveBufferSize(SOCKET socket, int bufferSize)
 
 	if (result == SOCKET_ERROR)
 	{
-		printf_s("setsockopt for SO_RCVBUF failed with error : %u\n", ::WSAGetLastError());
+		LOGE("setsockopt for SO_RCVBUF failed with error : %u", ::WSAGetLastError());
 		return false;
 	}
 
@@ -104,7 +107,7 @@ bool SocketOption::SetSendBufferSize(SOCKET socket, int bufferSize)
 
 	if (result == SOCKET_ERROR)
 	{
-		printf_s("setsockopt for SO_SNDBUF failed with error : %u\n", ::WSAGetLastError());
+		LOGE("setsockopt for SO_SNDBUF failed with error : %u", ::WSAGetLastError());
 		return false;
 	}
 
@@ -122,7 +125,7 @@ bool SocketOption::SetLinger(SOCKET socket, bool enable, int lingerTime)
 
 	if (result == SOCKET_ERROR)
 	{
-		printf_s("setsockopt for SO_LINGER failed with error : %u\n", ::WSAGetLastError());
+		LOGE("setsockopt for SO_LINGER failed with error : %u", ::WSAGetLastError());
 		return false;
 	}
 
@@ -136,7 +139,7 @@ bool SocketOption::SetAcceptContext(SOCKET clientSocket, SOCKET listenSocket)
 
 	if (result == SOCKET_ERROR)
 	{
-		printf_s("setsockopt for SO_UPDATE_ACCEPT_CONTEXT failed with error : %u\n", ::WSAGetLastError());
+		LOGE("setsockopt for SO_UPDATE_ACCEPT_CONTEXT failed with error : %u", ::WSAGetLastError());
 		return false;
 	}
 
@@ -150,7 +153,7 @@ bool SocketOption::SetClientContext(SOCKET clientSocket)
 
 	if (result == SOCKET_ERROR)
 	{
-		printf_s("setsockopt for SO_UPDATE_CONNECT_CONTEXT failed with error : %u\n", ::WSAGetLastError());
+		LOGE("setsockopt for SO_UPDATE_CONNECT_CONTEXT failed with error : %u", ::WSAGetLastError());
 		return false;
 	}
 

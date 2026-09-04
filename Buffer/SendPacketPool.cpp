@@ -1,9 +1,12 @@
 ﻿#include "SendPacketPool.h"
 
-#include <stdio.h> // for printf_s
 #include <assert.h> // for assert
 #include <malloc.h> // for _aligned_malloc, _aligned_free
 #include <new> // for placement-new, delete
+
+#include "../../Core/Util/Logger.h"
+
+using namespace Core::Util;
 
 SendPacketPool::SendPacketPool()
 {
@@ -76,7 +79,12 @@ SendPacketBuffer* SendPacketPool::Acquire()
 
 	if (!pEntry)
 	{
-		return nullptr; // 풀 고갈
+		// 풀 고갈. 지금까지는 조용히 nullptr 을 반환해서
+		// 상위(SendPacketQueue::Enqueue)에서 원인 구분이 불가능했다.
+		// 이 풀은 세션이 공유하므로(HybridSendPacketPool 샤딩) 고갈은
+		// 곧 해당 샤드의 송신 실패를 뜻한다.
+		LOGW("send packet pool exhausted (block count %u). sends on this shard will fail", m_blockCount);
+		return nullptr;
 	}
 
 	SendPacketBuffer* pPacketBuffer = static_cast<SendPacketBuffer*>(pEntry);

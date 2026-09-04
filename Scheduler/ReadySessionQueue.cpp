@@ -1,8 +1,10 @@
 ﻿#include "ReadySessionQueue.h"
 
-#include <stdio.h> // for printf_s
-
 #include "../Session/ISession.h"
+
+#include "../../Core/Util/Logger.h"
+
+using namespace Core::Util;
 
 ReadySessionQueue::ReadySessionQueue()
 {
@@ -56,7 +58,7 @@ bool ReadySessionQueue::Push(ISession* session)
 	if (m_count >= m_capacity)
 	{
 		::ReleaseSRWLockExclusive(&m_srwLock);
-		printf_s("[ReadySessionQueue] Queue full - Push Failed.\n");
+		LOGE("[ReadySessionQueue] Queue full - Push Failed.");
 		return false;
 	}
 
