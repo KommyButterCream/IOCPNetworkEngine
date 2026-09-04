@@ -33,9 +33,19 @@
 // Winsock 을 초기화 하고 GQCS 를 위한 스레드풀과 IOCP 핸들을 초기화 한다.
 // Server 와 Client 는 IOCPCore 를 상속받아 구현
 
+#include <stdint.h>
+
 class ISession;
 struct OverlappedEx;
 enum class IO_OPERATION;
+
+// GQCS 워커 스레드. Core::Concurrency::ThreadBase 파생이지만
+// 전방 선언만 둔다.
+//   - 엔진 내부 구현 세부사항이므로 소비자에게 노출할 필요가 없다
+//   - ThreadBase 는 export 되지 않으므로, 이 클래스를 공개 헤더에서
+//     dllexport 로 정의하면 C4275 (DLL 인터페이스가 아닌 기본 클래스) 가 난다
+// 실제 정의는 IOCPCore.cpp 에 있다.
+class IOCPWorkerThread;
 
 // 엔진 로그 출력 대상. 비트 조합 가능.
 // Core::Util::LogSink 와 값이 일치해야 하며 IOCPCore.cpp 에서 static_assert 로 검증한다.
@@ -104,10 +114,9 @@ private:
 	HANDLE m_iocpHandle = INVALID_HANDLE_VALUE; // IOCP 생성 핸들 저장
 
 	// IOCP GQCS Threads
-	bool m_iocpWorkerThreadRunning = false;
-	LONG m_threadCounter = 0; // ThreadID 카운터
+	// 스레드 핸들과 정지 이벤트, 조인은 ThreadBase 가 관리한다.
 	DWORD m_iocpThreadCount = 0; // IOCP GQCS 스레드 수량
-	HANDLE* m_iocpWorkerThreadHandles = nullptr; // IOCP GQCS 스레드 핸들
+	IOCPWorkerThread** m_iocpWorkerThreads = nullptr;
 
 private:
 	// Winsock
@@ -122,8 +131,10 @@ private:
 	bool CreateIOCPWorkerthread();
 	void DestroyIOCPWorkerthread();
 	void RequestIOCPThreadTerminate();
-	static unsigned int __stdcall IOCPWorkerThreadProc(LPVOID param);
-	void IOCPWorkerThreadLoop();
+
+public:
+	// IOCPWorkerThread 가 호출한다.
+	void IOCPWorkerThreadLoop(IOCPWorkerThread& worker, uint32_t workerIndex);
 };
 
 

@@ -5,9 +5,12 @@
 #include "../Session/SessionJobQueue.h"
 #include "../Memory/SlabMemoryPoolHelper.h"
 
-#include <process.h> // for _beginthread, _endthread
+#include "../../Core/Util/Logger.h"
+
+using namespace Core::Util;
 
 ClientSessionScheduler::ClientSessionScheduler()
+	: ThreadBase(L"ClientSessionScheduler")
 {
 }
 
@@ -20,6 +23,7 @@ bool ClientSessionScheduler::Initialize(ClientSession* clientSession, SlabMemory
 {
 	if (clientSession == nullptr || jobMemoryPool == nullptr)
 	{
+		LOGE("invalid arguments (session %p, jobPool %p)", clientSession, jobMemoryPool);
 		return false;
 	}
 
@@ -28,64 +32,37 @@ bool ClientSessionScheduler::Initialize(ClientSession* clientSession, SlabMemory
 	m_packetMemoryPool = packetMemoryPool;
 	m_generalMemoryPool = generalMemoryPool;
 
-	::InterlockedExchange(&m_stopFlag, 0);
-
-	m_stopEvent = ::CreateEvent(nullptr, TRUE, FALSE, nullptr);
-	if (!m_stopEvent)
-		return false;
-
-	unsigned int threadId = 0;
-	HANDLE thread = (HANDLE)_beginthreadex(
-		nullptr,
-		0,
-		&ClientSessionScheduler::WorkerThreadProc,
-		this,
-		0,
-		&threadId
-	);
-
-	if (!thread)
+	if (!Start())
 	{
+		LOGE("failed to start the scheduler thread");
 		return false;
 	}
 
-	m_thread = thread;
+	LOGI("client session scheduler started (thread id %u)", GetThreadId());
 
 	return true;
 }
 
 void ClientSessionScheduler::Finalize()
 {
-	if (m_thread == nullptr)
-		return;
-
-	::InterlockedExchange(&m_stopFlag, 1);
-
-	if (m_stopEvent)
+	if (!IsRunning() && m_clientSession == nullptr)
 	{
-		::SetEvent(m_stopEvent);
+		return;
 	}
+
+	// 정지 요청만 먼저 보낸다.
+	// Run() 은 SessionJobQueue::WaitDequeueJob 에서 조건 변수로 블로킹되므로
+	// 정지 이벤트만으로는 깨어나지 않는다. WakeUp 으로 깨워야 조인이 성립한다.
+	RequestStop();
 
 	if (m_clientSession)
 	{
 		m_clientSession->GetJobQueue().WakeUp();
 	}
 
-	if (m_thread)
-	{
-		::WaitForSingleObject(m_thread, INFINITE);
-		::CloseHandle(m_thread);
-		m_thread = nullptr;
-	}
+	Join();
 
-	if (m_stopEvent)
-	{
-		::ResetEvent(m_stopEvent);
-		::CloseHandle(m_stopEvent);
-		m_stopEvent = nullptr;
-	}
-
-	::InterlockedExchange(&m_stopFlag, 0);
+	LOGI("client session scheduler stopped");
 
 	m_jobMemoryPool = nullptr;
 	m_clientSession = nullptr;
@@ -93,21 +70,12 @@ void ClientSessionScheduler::Finalize()
 	m_packetMemoryPool = nullptr;
 }
 
-unsigned int __stdcall ClientSessionScheduler::WorkerThreadProc(LPVOID param)
+void ClientSessionScheduler::Run()
 {
-	ClientSessionScheduler* scheduler = static_cast<ClientSessionScheduler*>(param);
-
-	scheduler->WorkerThreadLoop();
-
-	return 0;
-}
-
-void ClientSessionScheduler::WorkerThreadLoop()
-{
-	while (::InterlockedCompareExchange(&m_stopFlag, 0, 0) == 0)
+	while (!IsStopRequested())
 	{
 		Job* job = nullptr;
-		bool gotJob = m_clientSession->GetJobQueue().WaitDequeueJob(job);
+		const bool gotJob = m_clientSession->GetJobQueue().WaitDequeueJob(job);
 
 		if (!gotJob)
 			break;

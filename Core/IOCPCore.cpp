@@ -1,13 +1,42 @@
 ﻿#include "IOCPCore.h"
 
-#include <process.h> // for _beginthread, _endthread
-#include <stdio.h> // for printf_s
+#include <stdio.h> // for swprintf_s
+#include <new>     // for std::nothrow
 
 #include "../../Core/Util/Logger.h"
+#include "../../Core/Concurrency/ThreadBase.h"
 
 #pragma comment(lib, "ws2_32.lib") // for WinSock2
 
 using namespace Core::Util;
+
+// GQCS 워커 스레드.
+// ThreadBase 는 객체 1개당 스레드 1개이므로 워커 N개를 두려면 객체를 N개 만든다.
+// 실제 루프는 IOCPCore 가 갖고 있고 이 클래스는 그 루프로 진입만 시킨다.
+class IOCPWorkerThread final : public Core::Concurrency::ThreadBase
+{
+public:
+	explicit IOCPWorkerThread(const wchar_t* name) : ThreadBase(name) {}
+
+	void Bind(IOCPCore* owner, uint32_t workerIndex)
+	{
+		m_owner = owner;
+		m_workerIndex = workerIndex;
+	}
+
+protected:
+	void Run() override
+	{
+		if (m_owner)
+		{
+			m_owner->IOCPWorkerThreadLoop(*this, m_workerIndex);
+		}
+	}
+
+private:
+	IOCPCore* m_owner = nullptr;
+	uint32_t m_workerIndex = 0;
+};
 
 IOCPCore::IOCPCore()
 {
@@ -191,71 +220,70 @@ bool IOCPCore::CreateIOCPWorkerthread()
 {
 	if (m_iocpThreadCount == 0)
 	{
+		LOGE("IOCP worker thread count is zero. call SetIOCPThreadCount first");
 		return false;
 	}
 
-	m_iocpWorkerThreadRunning = true;
-
-	m_iocpWorkerThreadHandles = new HANDLE[m_iocpThreadCount];
-
-	if (!m_iocpWorkerThreadHandles)
+	m_iocpWorkerThreads = static_cast<IOCPWorkerThread**>(
+		::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(IOCPWorkerThread*) * m_iocpThreadCount));
+	if (!m_iocpWorkerThreads)
+	{
+		LOGE("failed to allocate the worker table (count %lu)", m_iocpThreadCount);
 		return false;
-
-	::ZeroMemory(m_iocpWorkerThreadHandles, sizeof(HANDLE) * m_iocpThreadCount);
+	}
 
 	for (DWORD i = 0; i < m_iocpThreadCount; i++)
 	{
-		unsigned int threadId = 0;
-		HANDLE hThread = (HANDLE)_beginthreadex(
-			nullptr,
-			0,
-			&IOCPCore::IOCPWorkerThreadProc,
-			this,
-			0,
-			&threadId
-		);
+		// 스레드에 이름을 붙여 두면 디버거와 ETW 추적에서 바로 식별된다.
+		wchar_t threadName[64] = {};
+		::swprintf_s(threadName, L"IOCP-GQCS-%lu", i);
 
-		if (!hThread)
+		m_iocpWorkerThreads[i] = new (std::nothrow) IOCPWorkerThread(threadName);
+		if (!m_iocpWorkerThreads[i])
 		{
-			// 스레드 생성 실패
+			LOGE("failed to create IOCP worker %lu", i);
 			return false;
 		}
 
-		m_iocpWorkerThreadHandles[i] = hThread;
+		m_iocpWorkerThreads[i]->Bind(this, i);
+
+		if (!m_iocpWorkerThreads[i]->Start())
+		{
+			LOGE("failed to start IOCP worker %lu", i);
+			return false;
+		}
 	}
 
-	//Log::log(LogLevel::LOG_INFO, "[%s] createIOCPWorkerthread success\n", __FUNCTION__);
+	LOGI("IOCP GQCS workers started (count %lu)", m_iocpThreadCount);
 
 	return true;
 }
 
 void IOCPCore::DestroyIOCPWorkerthread()
 {
-	if (!m_iocpWorkerThreadHandles)
+	if (!m_iocpWorkerThreads)
 	{
 		return;
 	}
 
-	m_iocpWorkerThreadRunning = false;
-
-	Logger::Log(LogLevel::LOG_INFO, "[%s] IOCP GQCS 스레드 종료 대기 중...", __FUNCTION__);
+	LOGI("waiting for the IOCP GQCS workers to exit");
 
 	for (DWORD i = 0; i < m_iocpThreadCount; i++)
 	{
-		if (m_iocpWorkerThreadHandles[i])
+		if (m_iocpWorkerThreads[i])
 		{
-			::WaitForSingleObject(m_iocpWorkerThreadHandles[i], INFINITE);
-			::CloseHandle(m_iocpWorkerThreadHandles[i]);
-			m_iocpWorkerThreadHandles[i] = nullptr;
+			// 정지 요청은 RequestIOCPThreadTerminate 가 이미 보냈고
+			// 종료 코드로 GQCS 도 깨워 두었으므로 여기서는 조인만 한다.
+			// ThreadBase 소멸자가 Stop()(정지 요청 + 조인) 을 수행한다.
+			delete m_iocpWorkerThreads[i];
+			m_iocpWorkerThreads[i] = nullptr;
 		}
-
-		//Log::log(LogLevel::LOG_INFO, "[%s] destroyIOCPWorkerthread success\n", __FUNCTION__);
 	}
 
-	Logger::Log(LogLevel::LOG_INFO, "[%s] IOCP GQCS 스레드 종료 확인", __FUNCTION__);
+	LOGI("IOCP GQCS workers exited");
 
-	delete[] m_iocpWorkerThreadHandles;
-	m_iocpWorkerThreadHandles = nullptr;
+	::HeapFree(::GetProcessHeap(), 0, m_iocpWorkerThreads);
+	m_iocpWorkerThreads = nullptr;
 }
 
 void IOCPCore::RequestIOCPThreadTerminate()
@@ -266,7 +294,7 @@ void IOCPCore::RequestIOCPThreadTerminate()
 	// 하지만 그럴 수 없는 상황이라면 서버가 종료 메시지를 Post 해주도록 하자.
 	// 스레드를 종료시킨 후에 IOCP Handle 을 Close 해주도록 하자.
 
-	if (!m_iocpWorkerThreadHandles)
+	if (!m_iocpWorkerThreads)
 	{
 		return;
 	}
@@ -276,52 +304,38 @@ void IOCPCore::RequestIOCPThreadTerminate()
 		return;
 	}
 
-	Logger::Log(LogLevel::LOG_INFO, "[%s] IOCP GQCS 스레드에 종료 코드 전송 중...", __FUNCTION__);
+	LOGI("posting the terminate code to %lu IOCP GQCS workers", m_iocpThreadCount);
 
 	for (DWORD i = 0; i < m_iocpThreadCount; i++)
 	{
-		if (m_iocpWorkerThreadHandles[i])
+		if (!m_iocpWorkerThreads[i])
+			continue;
+
+		// 정지 이벤트만으로는 GQCS 의 무한 대기를 깨울 수 없으므로
+		// 이벤트를 세우고 종료 코드도 함께 Post 한다.
+		m_iocpWorkerThreads[i]->RequestStop();
+
+		BOOL bResult = ::PostQueuedCompletionStatus(m_iocpHandle, 0, TERMINATE_CODE, NULL);
+
+		if (!bResult)
 		{
-			BOOL bResult = ::PostQueuedCompletionStatus(m_iocpHandle, 0, TERMINATE_CODE, NULL);
-
-			if (!bResult)
-			{
-				DWORD error = ::GetLastError();
-
-				Logger::Log(LogLevel::LOG_ERROR, "[%s] IOCP GQCS 스레드에 종료 코드 전송 실패! (ERROR CODE : %d)", __FUNCTION__, error);
-
-				__debugbreak();
-			}
+			const DWORD error = ::GetLastError();
+			LOGE("failed to post the terminate code to worker %lu (error %lu)", i, error);
+			__debugbreak();
 		}
 	}
 }
 
-unsigned int __stdcall IOCPCore::IOCPWorkerThreadProc(LPVOID param)
+void IOCPCore::IOCPWorkerThreadLoop(IOCPWorkerThread& worker, uint32_t workerIndex)
 {
-	IOCPCore* self = static_cast<IOCPCore*>(param);
+	LOGI("GQCS worker %u entering loop", workerIndex);
 
-	self->IOCPWorkerThreadLoop();
-
-	return 0;
-}
-
-void IOCPCore::IOCPWorkerThreadLoop()
-{
-	const LONG iocpThreadId = ::InterlockedIncrement(&m_threadCounter) - 1;
-
-	BOOL completionStatus = FALSE;
-	DWORD bytesTransferred = 0;
-	ULONG_PTR completionKey = 0;
-	LPOVERLAPPED overlapped = nullptr;
-
-	Logger::Log(LogLevel::LOG_INFO, "[%s][Thread ID : %d] IOCP GQCS 스레드 생성 중...", __FUNCTION__, iocpThreadId);
-
-	while (m_iocpWorkerThreadRunning)
+	while (!worker.IsStopRequested())
 	{
-		completionStatus = FALSE;
-		bytesTransferred = 0;
-		completionKey = 0;
-		overlapped = nullptr;
+		BOOL completionStatus = FALSE;
+		DWORD bytesTransferred = 0;
+		ULONG_PTR completionKey = 0;
+		LPOVERLAPPED overlapped = nullptr;
 
 		// GetQueuedCompletionStatusEx 라는 확장형 함수도 있다. 나중에 사용해보자
 		completionStatus = ::GetQueuedCompletionStatus(
@@ -333,29 +347,24 @@ void IOCPCore::IOCPWorkerThreadLoop()
 
 		if (completionKey == TERMINATE_CODE)
 		{
-			// 서버가 GQCS Thread 종료를 요청한 경우
-			// Terminate Code 가 수신 되었으므로 스레드를 종료시킨다.
-
-			Logger::Log(LogLevel::LOG_INFO, "[%s][Thread ID : %d] IOCP GQCS Terminate Code 송신", __FUNCTION__, iocpThreadId);
-
-			//Log::log(LogLevel::LOG_INFO, "[%s] [Thread : %d] Terminate Code Enabled. worker closed\n", __FUNCTION__, iocpThreadID);
-			m_iocpWorkerThreadRunning = false;
+			// 종료 코드를 수신했으므로 이 스레드만 종료한다.
+			// 이전 구현은 공유 bool 을 false 로 바꿔서 다른 워커까지 한꺼번에
+			// 빠져나가게 만들었는데, 정지 판정이 워커별 이벤트로 바뀌었으므로
+			// 각 워커는 자기 몫의 종료 코드를 받고 나간다.
+			LOGI("GQCS worker %u received the terminate code", workerIndex);
 			break;
 		}
 
-		if (!m_iocpWorkerThreadRunning)
+		if (worker.IsStopRequested())
 		{
-			// 스레드 종료 시그널이 수신 되었으므로 스레드 종료를 위해 while 탈출한다.
-
-			//Log::log(LogLevel::LOG_INFO, "[%s] [Thread : %d] IOCPWorkerThreadLoop Terminated - ErroCode : %d, %d \n", __FUNCTION__, iocpThreadID, WSAGetLastError(), GetLastError());
-
+			LOGI("GQCS worker %u observed a stop request", workerIndex);
 			break;
 		}
 
 		HandleCompletion(completionKey, overlapped, bytesTransferred, completionStatus);
 	}
 
-	Logger::Log(LogLevel::LOG_INFO, "[%s][Thread ID : %d] IOCP GQCS 스레드를 종료 합니다.", __FUNCTION__, iocpThreadId);
+	LOGI("GQCS worker %u leaving loop", workerIndex);
 }
 
 bool IOCPCore::RegisterSocketToIOCP(ULONG_PTR completionKey, SOCKET socket)

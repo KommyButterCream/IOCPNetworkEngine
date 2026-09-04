@@ -7,28 +7,30 @@
 #include <Windows.h>
 #include <stdint.h>
 
+#include "../../Core/Concurrency/ThreadBase.h"
+
 class SlabMemoryPool;
 class ClientSession;
 
-class ClientSessionScheduler
+// 세션 1개의 JobQueue 를 처리하는 전용 스레드.
+// 스레드 1개 : 객체 1개 관계이므로 ThreadBase 를 직접 상속한다.
+// 스레드 핸들, 정지 이벤트, 조인은 ThreadBase 가 관리한다.
+class ClientSessionScheduler final : public Core::Concurrency::ThreadBase
 {
 public:
 	ClientSessionScheduler();
-	~ClientSessionScheduler();
+	~ClientSessionScheduler() override;
 
 public:
 	bool Initialize(ClientSession* clientSession, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool);
 	void Finalize();
 
+protected:
+	void Run() override;
+
 private:
-	HANDLE m_thread = nullptr;
-	HANDLE m_stopEvent = nullptr;
-	volatile LONG m_stopFlag = 0;
 	SlabMemoryPool* m_jobMemoryPool = nullptr;
 	ClientSession* m_clientSession = nullptr;
 	SlabMemoryPool* m_packetMemoryPool = nullptr;
 	SlabMemoryPool* m_generalMemoryPool = nullptr;
-
-	static unsigned int __stdcall WorkerThreadProc(LPVOID param);
-	void WorkerThreadLoop();
 };
