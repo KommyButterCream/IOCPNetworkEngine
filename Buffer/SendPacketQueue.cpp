@@ -178,7 +178,7 @@ bool SendPacketQueue::Dequeue(SendPacketBuffer*& outBlock)
 
 	::AcquireSRWLockExclusive(&m_srwLock);
 
-	if (IsEmpty())
+	if (IsEmptyLocked())
 	{
 		::ReleaseSRWLockExclusive(&m_srwLock);
 
@@ -222,6 +222,16 @@ void SendPacketQueue::Reset()
 }
 
 bool SendPacketQueue::IsEmpty() const
+{
+	// m_count 는 exclusive 락 아래에서만 변경되므로 shared 락으로 충분하다.
+	::AcquireSRWLockShared(&m_srwLock);
+	const bool empty = (m_count == 0);
+	::ReleaseSRWLockShared(&m_srwLock);
+
+	return empty;
+}
+
+bool SendPacketQueue::IsEmptyLocked() const
 {
 	return m_count == 0;
 }

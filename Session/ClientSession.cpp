@@ -486,32 +486,46 @@ bool ClientSession::TrySendNext()
 	if (GetSendPacketQueue() == nullptr)
 		return false;
 
-	// 이미 전송 중이라면 WSASend 호출 하지 않고 빠져나간다.
-	if (::InterlockedCompareExchange(&m_sending, 1, 0) != 0)
+	for (;;)
 	{
-		return false;
-	}
-
-	if (!m_currentSendPacket)
-	{
-		if (!GetSendPacketQueue()->Dequeue(m_currentSendPacket))
+		// 이미 전송 중이라면 WSASend 호출 하지 않고 빠져나간다.
+		// 전송을 담당 중인 스레드가 완료 시점에 다음 패킷을 이어서 보낸다.
+		if (::InterlockedCompareExchange(&m_sending, 1, 0) != 0)
 		{
-			// 보낼 패킷이 없는 경우
-			// Idle 상태로 플래그를 다시 변경 해준다.
-			::InterlockedExchange(&m_sending, 0);
 			return false;
 		}
 
-		m_sendOffset = 0;
-	}
+		if (!m_currentSendPacket)
+		{
+			if (!GetSendPacketQueue()->Dequeue(m_currentSendPacket))
+			{
+				// 보낼 패킷이 없는 경우
+				// Idle 상태로 플래그를 다시 변경 해준다.
+				::InterlockedExchange(&m_sending, 0);
 
-	if (!PostCurrentSend())
-	{
-		::InterlockedExchange(&m_sending, 0);
-		return false;
-	}
+				// 토큰을 반납하기 직전에 다른 스레드가 Enqueue 했을 수 있다.
+				// 그 스레드는 m_sending 이 1 이어서 "전송 담당자가 이어서 보내줄 것"으로
+				// 판단하고 물러났으므로, 여기서 재확인하지 않으면
+				// 그 패킷은 큐에 갇힌 채 아무도 보내지 않는 상태가 된다.
+				if (GetSendPacketQueue()->IsEmpty())
+				{
+					return false;
+				}
 
-	return true;
+				// 그 사이에 들어온 패킷이 있으므로 토큰 재획득을 시도한다.
+				continue;
+			}
+
+			m_sendOffset = 0;
+		}
+
+		// PostCurrentSend 는 실패 시 내부에서(또는 HandleSocketError 에서)
+		// 현재 패킷과 m_sending 토큰을 이미 정리한다.
+		// 여기서 토큰을 한 번 더 반납하면, 그 사이 정당하게 토큰을 획득한
+		// 다른 스레드의 소유권을 뺏어 WSASend 가 동시에 두 번 발행될 수 있다.
+		// m_sendOverlapped 는 세션당 하나뿐이므로 진행 중인 I/O 구조체가 손상된다.
+		return PostCurrentSend();
+	}
 }
 
 bool ClientSession::PostCurrentSend()
@@ -580,7 +594,9 @@ bool ClientSession::OnSendCompleted(const DWORD bytesTransferred)
 	SendPacketBuffer* currentPacket = m_currentSendPacket;
 	if (!currentPacket)
 	{
-		::InterlockedExchange(&m_sending, 0);
+		// 다른 경로(HandleSocketError 등)가 이미 패킷과 토큰을 정리한 상태다.
+		// 여기서 m_sending 을 건드리면 그 사이 토큰을 획득한 다른 스레드의
+		// 소유권을 뺏게 되므로 손대지 않는다.
 		return false;
 	}
 
