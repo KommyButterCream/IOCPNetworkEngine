@@ -680,33 +680,22 @@ bool ClientSession::EnqueueSendPacket(void** packetData, uint32_t packetSize)
 		return false;
 	}
 
-	uint32_t retryCount = 0;
-	while (true)
+	if (!GetSendPacketQueue()->Enqueue(packetData, packetSize))
 	{
-		if (GetSendPacketQueue()->Enqueue(packetData, packetSize))
-		{
-			// SendQueue 에 Enqueue 성공한 경우 while 탈출
-
-			TrySendNext();
-
-			//if (retryCount > 0)
-			//{
-			//	printf_s("Retry Count : %d\n", retryCount);
-			//}
-
-			return true;
-		}
-
-		retryCount++;
-		::Sleep(0);
-
-		if (retryCount > 100)
-		{
-			Logger::Log(LogLevel::LOG_ERROR, "[%s][ClientSession : %d] Failed to enqueue SendPacket(Retry : %d)", __FUNCTION__, GetSessionID(), retryCount);
-		}
+		// 송신 큐가 가득 찬 상태.
+		// 여기서 대기하면 호출 스레드(브로드캐스트 팬아웃 스레드, 로직 스레드 등)가
+		// 느린 피어 하나 때문에 묶이므로, 즉시 실패를 반환하고
+		// 드롭/재시도/연결 종료 같은 정책 판단은 호출자에게 맡긴다.
+		//
+		// 실패 시 Enqueue 는 *packetData 를 nullptr 로 만들지 않으므로
+		// 패킷 메모리의 소유권은 호출자가 계속 보유한다. 호출자가 해제해야 한다.
+		Logger::Log(LogLevel::LOG_WARNING, "[%s][ClientSession : %d] send queue full, packet dropped (PacketID : %u, Size : %u)", __FUNCTION__, GetSessionID(), packetHeader->packetId, packetSize);
+		return false;
 	}
 
-	return false;
+	TrySendNext();
+
+	return true;
 }
 
 bool ClientSession::EnqueueSharedSendPacket(const void* packetData, uint32_t packetSize, SendPacketReleaseFunc releaseFunc, void* releaseContext)
