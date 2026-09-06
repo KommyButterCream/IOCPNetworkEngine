@@ -48,8 +48,18 @@ IOCPServer::~IOCPServer()
 	StopServer();
 }
 
-bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount)
+bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount, const SessionBufferConfig& bufferConfig)
 {
+	// 설정 오류는 아무것도 잡기 전에 걸러낸다. 세션 생성 단계까지 끌고 가면
+	// 세션을 하나도 못 잡는 서버가 정상 기동한 것처럼 보인다.
+	if (!bufferConfig.IsValid())
+	{
+		LOGE("invalid session buffer config : recv %u / ring %u, send %u, queue %u",
+			bufferConfig.maxRecvPacketSize, bufferConfig.recvRingSize,
+			bufferConfig.maxSendPacketSize, bufferConfig.sendQueueDepth);
+		return false;
+	}
+
 	SetIOCPThreadCount(::GetMaximumProcessorCount(ALL_PROCESSOR_GROUPS));
 
 	if (!IOCPCore::Start())
@@ -165,7 +175,7 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		return false;
 
 	//::GetMaximumProcessorCount(ALL_PROCESSOR_GROUPS) / 2;
-	if (!m_sessionManager->Initialize(1, maxConnectionCount, m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, IOCPCore::CloseSocketHandle))
+	if (!m_sessionManager->Initialize(1, maxConnectionCount, m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, IOCPCore::CloseSocketHandle, bufferConfig))
 		return false;
 
 	if (!PrepareAccept())
@@ -747,7 +757,7 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 	{
 		ENGINE_VIOLATION("session %u recv ring commit failed : %lu bytes would overflow (stored %u / capacity %u)",
 			clientSession->GetSessionID(), bytesTransferred,
-			recvBuf.GetStoredSize(), RECV_PACKET_BUFFER_SIZE);
+			recvBuf.GetStoredSize(), recvBuf.GetCapacity());
 
 		clientSession->DecrementIO();
 		return;
@@ -760,9 +770,23 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 		uint16_t packetId = 0;
 		char* packetDataByMemoryPool = nullptr;
 
-		if (!recvBuf.ReadPacket(packetDataByMemoryPool, packetSize, packetId))
+		const PacketReadResult readResult = recvBuf.ReadPacket(packetDataByMemoryPool, packetSize, packetId);
+
+		if (readResult == PacketReadResult::NeedMoreData)
 		{
-			// 패킷이 아직 다 안 왔거나 오류
+			// 아직 다 안 왔다. 다음 수신 완료에서 이어서 파싱한다.
+			break;
+		}
+
+		if (readResult != PacketReadResult::Ok)
+		{
+			// Invalid 는 피어가 규칙 밖의 크기를 적어 보낸 것이고,
+			// OutOfMemory 는 패킷 풀이 고갈된 것이다. 둘 다 이 스트림을
+			// 더 이상 신뢰할 수 없으므로 세션을 끊는다.
+			LOGE("session %u recv stream is unusable (%s). dropping the session",
+				clientSession->GetSessionID(),
+				readResult == PacketReadResult::Invalid ? "invalid packet size" : "packet pool exhausted");
+			releaseSessionAfterHandling = true;
 			break;
 		}
 
@@ -864,6 +888,10 @@ void IOCPServer::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD
 		clientSession->DecrementIO();
 		return;
 	}
+
+	// 선언만 되어 있고 엔진이 부르지 않던 훅이다. OnReceive 와 대칭이 맞아야
+	// 서비스가 송신 완료를 관측할 수 있다.
+	OnSend(session, bytesTransferred);
 
 	// OnSendCompleted 가 다음 패킷의 WSASend 까지 발행하므로,
 	// 우리 몫의 카운트를 먼저 내려놓으면 그 사이 카운트가 0 이 되어

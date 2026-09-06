@@ -18,7 +18,7 @@ SessionManager::~SessionManager()
 	Finalize();
 }
 
-bool SessionManager::Initialize(const uint32_t acceptSessionCount, const uint32_t clientSessionCount, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, CloseSocketFunc closeSocketFunc)
+bool SessionManager::Initialize(const uint32_t acceptSessionCount, const uint32_t clientSessionCount, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, CloseSocketFunc closeSocketFunc, const SessionBufferConfig& bufferConfig)
 {
 	m_acceptSessionCount = acceptSessionCount;
 	m_clientSessionCount = clientSessionCount;
@@ -29,8 +29,8 @@ bool SessionManager::Initialize(const uint32_t acceptSessionCount, const uint32_
 
 	m_acceptSessionPool->SetSocketCloseFunc(closeSocketFunc);
 
-	m_clientSessionPool = new ClientSessionPool(clientSessionCount, hybridSendPacketPool, jobMemoryPool, packetMemoryPool, generalMemoryPool);
-	if (!m_clientSessionPool)
+	m_clientSessionPool = new ClientSessionPool(clientSessionCount, hybridSendPacketPool, jobMemoryPool, packetMemoryPool, generalMemoryPool, bufferConfig);
+	if (!m_clientSessionPool || !m_clientSessionPool->IsReady())
 		return false;
 
 	m_clientSessionPool->SetSocketCloseFunc(closeSocketFunc);

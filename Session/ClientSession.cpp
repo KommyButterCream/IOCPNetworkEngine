@@ -124,6 +124,18 @@ void ClientSession::ResetSession()
 		m_sendPacketQueue->Reset();
 	}
 
+	// 수신 링을 비운다. 이게 없으면 세션이 끊길 때 링에 남아 있던 바이트가
+	// 그대로 살아남아, 이 슬롯을 재사용하는 다음 클라이언트의 스트림 앞에
+	// 붙는다. 그 클라이언트는 첫 바이트부터 남의 데이터를 헤더로 읽는다.
+	// (RecvPacketBuffer::Reset 은 지금까지 아무도 부르지 않고 있었다)
+	//
+	// GetReceiveBuffer 는 널 검사 없이 역참조하는데, ResetSession 은 정리
+	// 경로에서도 불리므로 포인터로 직접 다룬다.
+	if (m_recvPacketBuffer)
+	{
+		m_recvPacketBuffer->Reset();
+	}
+
 	// 전송 중이던 패킷을 반환한다.
 	// 포인터만 버리면 패킷 메모리와 SendPacketBuffer 가 함께 누수된다.
 	// (RST 등으로 전송 도중에 세션이 정리되는 경로에서 실제로 발생한다)
@@ -333,8 +345,18 @@ bool ClientSession::OnDisconnect()
 	return true;
 }
 
-bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool)
+bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig)
 {
+	if (!bufferConfig.IsValid())
+	{
+		ENGINE_VIOLATION("session %u received an invalid buffer config (recv %u/ring %u, send %u, queue %u)",
+			GetSessionID(), bufferConfig.maxRecvPacketSize, bufferConfig.recvRingSize,
+			bufferConfig.maxSendPacketSize, bufferConfig.sendQueueDepth);
+		return false;
+	}
+
+	m_bufferConfig = bufferConfig;
+
 	m_jobMemoryPool = jobMemoryPool;
 	m_packetMemoryPool = packetMemoryPool;
 	m_generalMemoryPool = generalMemoryPool;
@@ -342,7 +364,7 @@ bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketP
 	m_recvPacketBuffer = new RecvPacketBuffer();
 	if (!m_recvPacketBuffer)
 		return false;
-	if (!m_recvPacketBuffer->Initialize(packetMemoryPool))
+	if (!m_recvPacketBuffer->Initialize(packetMemoryPool, m_bufferConfig.recvRingSize, m_bufferConfig.maxRecvPacketSize))
 	{
 		delete m_recvPacketBuffer;
 		m_recvPacketBuffer = nullptr;
@@ -391,7 +413,7 @@ bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketP
 		return false;
 	}
 
-	if (!m_sendPacketQueue->Initialize(m_sendPacketPool, packetMemoryPool, generalMemoryPool))
+	if (!m_sendPacketQueue->Initialize(m_sendPacketPool, packetMemoryPool, generalMemoryPool, m_bufferConfig.sendQueueDepth))
 	{
 		delete m_sendPacketQueue;
 		m_sendPacketQueue = nullptr;
@@ -492,13 +514,18 @@ bool ClientSession::PostReceive()
 
 	RecvPacketBuffer& recvBuf = GetReceiveBuffer();
 
+	// 링 끝에 붙어 있으면 남은 조각을 앞으로 당겨 연속 공간을 만든다.
+	// 이게 없으면 쓰기 위치가 끝에 가까워질수록 WSARecv 길이가 줄어들어,
+	// 같은 양을 받는 데 필요한 완료 횟수가 계속 늘어난다.
+	recvBuf.PrepareWrite();
+
 	m_recvOverlapped.operation = IO_OPERATION::RECV;
 	m_recvOverlapped.wsaBuffer.buf = recvBuf.GetWriteablePtr();
 	m_recvOverlapped.wsaBuffer.len = recvBuf.GetWriteableSize();
 
 	if (m_recvOverlapped.wsaBuffer.len == 0)
 	{
-		LOGE("session %u recv ring is full, cannot post recv (stored %u / capacity %u)", GetSessionID(), GetReceiveBuffer().GetStoredSize(), RECV_PACKET_BUFFER_SIZE);
+		LOGE("session %u recv ring is full, cannot post recv (stored %u / capacity %u)", GetSessionID(), recvBuf.GetStoredSize(), recvBuf.GetCapacity());
 
 		// 버퍼에 공간이 부족한 경우 시간을 저장했다가
 		// 별도의 타이머 스레드에서 타임아웃 관련 처리(Session Disconnect 등) 하도록 한다.
@@ -744,6 +771,16 @@ bool ClientSession::EnqueueSendPacket(void** packetData, uint32_t packetSize)
 		return false;
 	}
 
+	// 받는 쪽은 자기 maxRecvPacketSize 를 넘는 헤더를 프로토콜 위반으로 보고
+	// 연결을 끊는다. 여기서 막지 않으면 보낸 쪽은 원인 모를 피어 끊김만
+	// 보게 되므로, 같은 상한을 송신 시점에 적용해 호출부에서 잡아준다.
+	if (packetSize > m_bufferConfig.maxSendPacketSize)
+	{
+		LOGE("session %u packet too large to send (%u bytes, max %u). the peer would drop the connection",
+			GetSessionID(), packetSize, m_bufferConfig.maxSendPacketSize);
+		return false;
+	}
+
 	if (!CanSendPacket(packetHeader->packetId))
 	{
 		LOGW("session %u packet send blocked before session established (PacketID : %u)", GetSessionID(), packetHeader->packetId);
@@ -783,6 +820,16 @@ bool ClientSession::EnqueueSharedSendPacket(const void* packetData, uint32_t pac
 	if (packetHeader->packetSize != packetSize)
 	{
 		LOGE("session %u packet size mismatch (header=%u, arg=%u)", GetSessionID(), packetHeader->packetSize, packetSize);
+		return false;
+	}
+
+	// 받는 쪽은 자기 maxRecvPacketSize 를 넘는 헤더를 프로토콜 위반으로 보고
+	// 연결을 끊는다. 여기서 막지 않으면 보낸 쪽은 원인 모를 피어 끊김만
+	// 보게 되므로, 같은 상한을 송신 시점에 적용해 호출부에서 잡아준다.
+	if (packetSize > m_bufferConfig.maxSendPacketSize)
+	{
+		LOGE("session %u packet too large to send (%u bytes, max %u). the peer would drop the connection",
+			GetSessionID(), packetSize, m_bufferConfig.maxSendPacketSize);
 		return false;
 	}
 

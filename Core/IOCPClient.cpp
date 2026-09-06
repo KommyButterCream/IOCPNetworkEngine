@@ -43,8 +43,17 @@ IOCPClient::~IOCPClient()
 	StopClient();
 }
 
-bool IOCPClient::StartClient(const char* serverIp, const uint16_t port)
+bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const SessionBufferConfig& bufferConfig)
 {
+	// 설정 오류는 아무것도 잡기 전에 걸러낸다.
+	if (!bufferConfig.IsValid())
+	{
+		LOGE("invalid session buffer config : recv %u / ring %u, send %u, queue %u",
+			bufferConfig.maxRecvPacketSize, bufferConfig.recvRingSize,
+			bufferConfig.maxSendPacketSize, bufferConfig.sendQueueDepth);
+		return false;
+	}
+
 	strcpy_s(m_serverIPAddress, sizeof(m_serverIPAddress), serverIp);
 	m_serverPort = port;
 
@@ -151,7 +160,7 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port)
 	if (!m_session)
 		return false;
 	m_session->Initialize(SESSION_ROLE::CLIENT, 0);
-	if (!m_session->InitializeMemoryPool(m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool))
+	if (!m_session->InitializeMemoryPool(m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, bufferConfig))
 		return false;
 	m_session->SetEventHandler(this);
 
@@ -476,7 +485,7 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 	{
 		ENGINE_VIOLATION("session %u recv ring commit failed : %lu bytes would overflow (stored %u / capacity %u)",
 			clientSession->GetSessionID(), bytesTransferred,
-			recvBuf.GetStoredSize(), RECV_PACKET_BUFFER_SIZE);
+			recvBuf.GetStoredSize(), recvBuf.GetCapacity());
 
 		clientSession->DecrementIO();
 		return;
@@ -489,9 +498,23 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 		uint16_t packetId = 0;
 		char* packetDataByMemoryPool = nullptr;
 
-		if (!recvBuf.ReadPacket(packetDataByMemoryPool, packetSize, packetId))
+		const PacketReadResult readResult = recvBuf.ReadPacket(packetDataByMemoryPool, packetSize, packetId);
+
+		if (readResult == PacketReadResult::NeedMoreData)
 		{
-			// 패킷이 아직 다 안 왔거나 오류
+			// 아직 다 안 왔다. 다음 수신 완료에서 이어서 파싱한다.
+			break;
+		}
+
+		if (readResult != PacketReadResult::Ok)
+		{
+			// Invalid 는 서버가 규칙 밖의 크기를 적어 보낸 것이고,
+			// OutOfMemory 는 패킷 풀이 고갈된 것이다. 둘 다 이 스트림을
+			// 더 이상 신뢰할 수 없으므로 연결을 끊는다.
+			LOGE("session %u recv stream is unusable (%s). dropping the connection",
+				clientSession->GetSessionID(),
+				readResult == PacketReadResult::Invalid ? "invalid packet size" : "packet pool exhausted");
+			disconnectAfterHandling = true;
 			break;
 		}
 

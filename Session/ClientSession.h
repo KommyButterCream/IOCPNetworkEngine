@@ -10,6 +10,7 @@
 #include "../Network/OverlappedEx.h"
 #include "../Protocol/PacketID.h"
 #include "../Buffer/SendPacketPool.h"
+#include "../Buffer/SessionBufferConfig.h"
 
 struct Job;
 struct SendPacketBuffer;
@@ -50,6 +51,10 @@ private:
 	RecvPacketBuffer* m_recvPacketBuffer = nullptr;
 	ULONGLONG m_lastRecvBufferFullTime = 0;
 
+	// 이 세션의 버퍼 크기 정책. InitializeMemoryPool 에서 받아 보관한다.
+	// 송신 상한 검사가 여기를 본다.
+	SessionBufferConfig m_bufferConfig;
+
 	OverlappedEx m_sendOverlapped{};
 	SendPacketQueue* m_sendPacketQueue = nullptr;
 	SendPacketPool* m_sendPacketPool = nullptr;
@@ -86,7 +91,7 @@ public:
 
 	// ClientSession 전용 메서드
 public:
-	bool InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool);
+	bool InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig);
 
 	bool IsReady() const;
 	bool IsConnected() const;

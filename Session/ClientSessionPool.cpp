@@ -10,7 +10,7 @@
 
 using namespace Core::Util;
 
-ClientSessionPool::ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool)
+ClientSessionPool::ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig)
 {
 	m_capacity = capacity;
 
@@ -31,7 +31,7 @@ ClientSessionPool::ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hy
 			return;
 		}
 
-		if (!m_sessions[i].InitializeMemoryPool(hybridSendPacketPool, jobMemoryPool, packetMemoryPool, generalMemoryPool))
+		if (!m_sessions[i].InitializeMemoryPool(hybridSendPacketPool, jobMemoryPool, packetMemoryPool, generalMemoryPool, bufferConfig))
 		{
 			ENGINE_VIOLATION("failed to bind memory pools to client session %u of %u", i, m_capacity);
 			return;
@@ -41,6 +41,8 @@ ClientSessionPool::ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hy
 		m_nodes[i].nextNode = m_freeList;
 		m_freeList = &m_nodes[i];
 	}
+
+	m_ready = true;
 }
 
 ClientSessionPool::~ClientSessionPool()

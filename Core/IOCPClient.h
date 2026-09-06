@@ -3,6 +3,7 @@
 #include "IOCPCore.h"
 #include "../Session/ISessionEvent.h"
 #include "../Job/JobDefs.h"
+#include "../Buffer/SessionBufferConfig.h"
 
 #include <stdint.h>
 
@@ -34,7 +35,8 @@ public:
 	virtual ~IOCPClient();
 
 public:
-	bool StartClient(const char* serverIp, const uint16_t port);
+	bool StartClient(const char* serverIp, const uint16_t port,
+		const SessionBufferConfig& bufferConfig = SessionBufferPreset::Client());
 	void StopClient();
 
 private:

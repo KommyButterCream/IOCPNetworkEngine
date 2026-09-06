@@ -5,6 +5,8 @@
 
 #include "SendPacketPool.h"
 
+#include "../Diagnostics/EngineAssert.h"
+
 #include "../Memory/EngineMemoryPoolHelper.h"
 
 namespace
@@ -31,12 +33,17 @@ SendPacketQueue::SendPacketQueue()
 {
 }
 
-bool SendPacketQueue::Initialize(SendPacketPool* sendPacketPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool)
+bool SendPacketQueue::Initialize(SendPacketPool* sendPacketPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, uint32_t depth)
 {
-	static_assert((SEND_PACKET_QUEUE_SIZE & (SEND_PACKET_QUEUE_SIZE - 1)) == 0, "Buffer size must be power of 2");
-
 	if (!sendPacketPool || !packetMemoryPool || !generalMemoryPool)
 	{
+		return false;
+	}
+
+	// 예전에는 static_assert 였다. 깊이가 런타임 값이 되었으므로 여기서 막는다.
+	if (depth == 0 || (depth & (depth - 1)) != 0)
+	{
+		ENGINE_VIOLATION("send queue depth %u is not a power of two", depth);
 		return false;
 	}
 
@@ -45,7 +52,9 @@ bool SendPacketQueue::Initialize(SendPacketPool* sendPacketPool, EngineMemoryPoo
 	m_packetPool = sendPacketPool;
 	m_packetMemoryPool = packetMemoryPool;
 	m_generalMemoryPool = generalMemoryPool;
-	m_queue = new SendPacketBuffer * [SEND_PACKET_QUEUE_SIZE] {};
+	m_capacity = static_cast<int32_t>(depth);
+	m_capacityMask = m_capacity - 1;
+	m_queue = new SendPacketBuffer * [depth] {};
 	if (!m_queue)
 	{
 		Finalize();
@@ -80,6 +89,8 @@ void SendPacketQueue::Finalize()
 	m_head = 0;
 	m_tail = 0;
 	m_count = 0;
+	m_capacity = 0;
+	m_capacityMask = 0;
 }
 
 bool SendPacketQueue::Enqueue(void** packetData, uint32_t packetSize)
@@ -87,12 +98,12 @@ bool SendPacketQueue::Enqueue(void** packetData, uint32_t packetSize)
 	if (!m_queue || !m_packetPool || !m_packetMemoryPool || !m_generalMemoryPool)
 		return false;
 
-	if (!packetData || !(*packetData) || packetSize == 0 || packetSize > MEMORY_SIZE_32K)
+	if (!packetData || !(*packetData) || packetSize == 0 || packetSize > PACKET_SIZE_LIMIT)
 		return false;
 
 	::AcquireSRWLockExclusive(&m_srwLock);
 
-	if (m_count >= SEND_PACKET_QUEUE_SIZE)
+	if (m_count >= m_capacity)
 	{
 		::ReleaseSRWLockExclusive(&m_srwLock);
 
@@ -122,7 +133,7 @@ bool SendPacketQueue::Enqueue(void** packetData, uint32_t packetSize)
 	block->releaseContext = nullptr;
 
 	m_queue[m_tail] = block;
-	m_tail = (m_tail + 1) & (SEND_PACKET_QUEUE_SIZE - 1);
+	m_tail = (m_tail + 1) & (m_capacityMask);
 	++m_count;
 
 	::ReleaseSRWLockExclusive(&m_srwLock);
@@ -135,12 +146,12 @@ bool SendPacketQueue::EnqueueShared(const void* packetData, uint32_t packetSize,
 	if (!m_queue || !m_packetPool || !m_packetMemoryPool || !m_generalMemoryPool)
 		return false;
 
-	if (!packetData || packetSize == 0 || packetSize > MEMORY_SIZE_32K || !releaseFunc)
+	if (!packetData || packetSize == 0 || packetSize > PACKET_SIZE_LIMIT || !releaseFunc)
 		return false;
 
 	::AcquireSRWLockExclusive(&m_srwLock);
 
-	if (m_count >= SEND_PACKET_QUEUE_SIZE)
+	if (m_count >= m_capacity)
 	{
 		::ReleaseSRWLockExclusive(&m_srwLock);
 
@@ -161,7 +172,7 @@ bool SendPacketQueue::EnqueueShared(const void* packetData, uint32_t packetSize,
 	block->releaseContext = releaseContext;
 
 	m_queue[m_tail] = block;
-	m_tail = (m_tail + 1) & (SEND_PACKET_QUEUE_SIZE - 1);
+	m_tail = (m_tail + 1) & (m_capacityMask);
 	++m_count;
 
 	::ReleaseSRWLockExclusive(&m_srwLock);
@@ -187,7 +198,7 @@ bool SendPacketQueue::Dequeue(SendPacketBuffer*& outBlock)
 
 	outBlock = m_queue[m_head];
 	m_queue[m_head] = nullptr;
-	m_head = (m_head + 1) & (SEND_PACKET_QUEUE_SIZE - 1);
+	m_head = (m_head + 1) & (m_capacityMask);
 	--m_count;
 
 	::ReleaseSRWLockExclusive(&m_srwLock);
@@ -203,7 +214,7 @@ void SendPacketQueue::Reset()
 	::AcquireSRWLockExclusive(&m_srwLock);
 
 	// 남아 있는 블록 반환
-	for (int i = 0; i < SEND_PACKET_QUEUE_SIZE; ++i)
+	for (int i = 0; i < m_capacity; ++i)
 	{
 		if (m_queue[i])
 		{

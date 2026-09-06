@@ -9,6 +9,8 @@
 
 #include "ISessionEvent.h"
 
+#include "../Buffer/SessionBufferConfig.h"
+
 class ISession;
 class ClientSessionPool;
 class AcceptSessionPool;
@@ -35,7 +37,7 @@ private:
 	uint32_t m_clientSessionCount = 0;
 
 public:
-	bool Initialize(const uint32_t acceptSessionCount, const uint32_t clientSessionCount, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, CloseSocketFunc closeSocketFunc);
+	bool Initialize(const uint32_t acceptSessionCount, const uint32_t clientSessionCount, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, CloseSocketFunc closeSocketFunc, const SessionBufferConfig& bufferConfig);
 	void Finalize();
 
 	// Accept Session //

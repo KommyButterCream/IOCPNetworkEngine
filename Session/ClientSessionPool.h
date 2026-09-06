@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include "ISessionEvent.h"
 
+#include "../Buffer/SessionBufferConfig.h"
+
 struct SessionNode;
 
 class ISession;
@@ -26,9 +28,16 @@ private:
 	ISessionEvent* m_eventHandler = nullptr;
 	CloseSocketFunc m_closeSocketFunc = nullptr;
 
+	// 생성자는 실패를 반환할 수 없다. 세션 하나라도 준비에 실패하면 여기가
+	// false 로 남고, SessionManager 가 그걸 보고 초기화를 실패시킨다.
+	// 이게 없으면 세션을 하나도 못 잡는 서버가 정상 기동한 것처럼 보인다.
+	bool m_ready = false;
+
 public:
-	explicit ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool);
+	explicit ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig);
 	~ClientSessionPool();
+
+	bool IsReady() const { return m_ready; }
 
 	// 세션 획득
 	ISession* Acquire();

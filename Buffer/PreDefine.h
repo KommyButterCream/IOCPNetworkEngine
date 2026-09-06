@@ -35,7 +35,12 @@ constexpr static uint32_t BLOCK_COUNT_32K = 1024 * 32;
 constexpr static uint32_t BLOCK_COUNT_64K = 1024 * 64;
 
 
-constexpr static uint32_t RECV_PACKET_BUFFER_SIZE = MEMORY_SIZE_1MB;
-constexpr static uint32_t SEND_PACKET_QUEUE_SIZE = BLOCK_COUNT_4K;
+// PACKET_HEADER::packetSize 가 uint16_t 라 이 값을 넘는 패킷은 애초에
+// 표현할 수 없다. 모든 크기 설정의 절대 상한이다.
+constexpr static uint32_t PACKET_SIZE_LIMIT = 65535;
+
+// 세션당 수신 링과 송신 큐 크기는 SessionBufferConfig 로 옮겼다.
+// 역할마다 적정값이 한 자릿수 배 이상 벌어져서 상수 하나로 덮을 수 없다.
+// (Buffer/SessionBufferConfig.h 참고)
 constexpr static uint32_t HYBRID_SEND_PACKET_POOL_SIZE = BLOCK_COUNT_64K;
 constexpr static uint32_t INFERENCE_CHUNK_SIZE = MEMORY_SIZE_4K;

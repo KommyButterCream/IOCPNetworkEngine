@@ -17,7 +17,7 @@ public:
 	SendPacketQueue();
 	~SendPacketQueue();
 
-	bool Initialize(SendPacketPool* sendPacketPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool);
+	bool Initialize(SendPacketPool* sendPacketPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, uint32_t depth);
 	void Finalize();
 
 	bool Enqueue(void** packetData, uint32_t packetSize);
@@ -40,6 +40,10 @@ private:
 	alignas(64) mutable SRWLOCK m_srwLock = SRWLOCK_INIT;
 
 	SendPacketBuffer** m_queue = nullptr;
+
+	// 예전에는 컴파일 타임 상수였다. 역할마다 적정 깊이가 달라 런타임으로 옮겼다.
+	int32_t m_capacity = 0;
+	int32_t m_capacityMask = 0;
 	SendPacketPool* m_packetPool = nullptr;
 	EngineMemoryPool* m_packetMemoryPool = nullptr;
 	EngineMemoryPool* m_generalMemoryPool = nullptr;

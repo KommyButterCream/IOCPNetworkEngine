@@ -17,19 +17,43 @@ RecvPacketBuffer::RecvPacketBuffer()
 {
 }
 
-bool RecvPacketBuffer::Initialize(EngineMemoryPool* packetMemoryPool)
+bool RecvPacketBuffer::Initialize(EngineMemoryPool* packetMemoryPool, uint32_t ringSize, uint32_t maxPacketSize)
 {
-	static_assert((RECV_PACKET_BUFFER_SIZE & (RECV_PACKET_BUFFER_SIZE - 1)) == 0, "Buffer size must be power of 2");
-
 	if (packetMemoryPool == nullptr)
 	{
+		return false;
+	}
+
+	// 예전에는 static_assert 였다. 크기가 런타임 값이 되었으므로 여기서 막는다.
+	if (ringSize == 0 || (ringSize & (ringSize - 1)) != 0)
+	{
+		ENGINE_VIOLATION("recv ring size %u is not a power of two", ringSize);
+		return false;
+	}
+
+	if (maxPacketSize < sizeof(PACKET_HEADER) || maxPacketSize > PACKET_SIZE_LIMIT)
+	{
+		ENGINE_VIOLATION("max recv packet size %u is outside [%zu, %u]",
+			maxPacketSize, sizeof(PACKET_HEADER), PACKET_SIZE_LIMIT);
+		return false;
+	}
+
+	// PrepareWrite 가 조각을 앞으로 당긴 뒤에도 최대 패킷 하나가 통째로
+	// 들어가야 한다. 링이 최대 패킷의 2배보다 작으면 그 보장이 깨진다.
+	if (ringSize < maxPacketSize * 2)
+	{
+		ENGINE_VIOLATION("recv ring %u cannot hold a fragment plus a %u byte packet", ringSize, maxPacketSize);
 		return false;
 	}
 
 	Finalize();
 
 	m_packetMemoryPool = packetMemoryPool;
-	m_buffer = static_cast<char*>(_aligned_malloc(RECV_PACKET_BUFFER_SIZE, 64));
+	m_capacity = ringSize;
+	m_capacityMask = ringSize - 1;
+	m_maxPacketSize = maxPacketSize;
+
+	m_buffer = static_cast<char*>(_aligned_malloc(m_capacity, 64));
 	if (!m_buffer)
 	{
 		Finalize();
@@ -52,6 +76,10 @@ void RecvPacketBuffer::Finalize()
 	m_writePos = 0;
 	m_readPos = 0;
 	m_storedSize = 0;
+
+	m_capacity = 0;
+	m_capacityMask = 0;
+	m_maxPacketSize = 0;
 
 	if (m_buffer)
 	{
@@ -87,8 +115,8 @@ uint32_t RecvPacketBuffer::GetWriteableSize() const
 
 	if (m_writePos >= m_readPos)
 	{
-		const uint32_t spaceToEnd = RECV_PACKET_BUFFER_SIZE - m_writePos;
-		const uint32_t totalSpace = RECV_PACKET_BUFFER_SIZE - m_storedSize;
+		const uint32_t spaceToEnd = m_capacity - m_writePos;
+		const uint32_t totalSpace = m_capacity - m_storedSize;
 
 		return spaceToEnd < totalSpace ? spaceToEnd : totalSpace;
 	}
@@ -111,7 +139,7 @@ bool RecvPacketBuffer::CommitWrite(const uint32_t bytesReceived)
 		return false;
 	}
 
-	m_writePos = (m_writePos + bytesReceived) & (RECV_PACKET_BUFFER_SIZE - 1);
+	m_writePos = (m_writePos + bytesReceived) & m_capacityMask;
 	m_storedSize += bytesReceived;
 
 	return true;
@@ -125,7 +153,7 @@ bool RecvPacketBuffer::PeekHeader(PACKET_HEADER& header)
 	if (m_storedSize < sizeof(PACKET_HEADER))
 		return false;
 
-	uint32_t remainFirst = RECV_PACKET_BUFFER_SIZE - m_readPos;
+	uint32_t remainFirst = m_capacity - m_readPos;
 	if (remainFirst >= sizeof(PACKET_HEADER)) [[likely]]
 	{
 		memcpy(&header, m_buffer + m_readPos, sizeof(PACKET_HEADER));
@@ -140,7 +168,47 @@ bool RecvPacketBuffer::PeekHeader(PACKET_HEADER& header)
 	return true;
 }
 
-bool RecvPacketBuffer::ReadPacket(char*& outBuffer, uint32_t& outSize, uint16_t& outPacketId)
+void RecvPacketBuffer::PrepareWrite()
+{
+	if (!m_buffer)
+		return;
+
+	// 다 비었으면 원점으로 되돌린다. 제어 메시지처럼 받는 족족 소비되는
+	// 트래픽은 거의 항상 여기로 떨어져서, 링이 사실상 앞부분만 쓴다.
+	if (m_storedSize == 0)
+	{
+		m_readPos = 0;
+		m_writePos = 0;
+		return;
+	}
+
+	// 조각이 뒤로 감겨 있으면 앞으로 당길 수 없다. 이때 쓰기 공간은 readPos
+	// 앞의 틈이라 어차피 이미 연속이다.
+	//
+	// readPos == writePos 인데 비어 있지 않은 "가득 참" 도 여기서 걸러진다.
+	// 그 경우를 Compact 로 넘기면 링 끝을 넘어 읽는다.
+	if (m_readPos + m_storedSize > m_capacity)
+		return;
+
+	// 끝까지 최대 패킷이 들어갈 만큼 남았으면 건드리지 않는다.
+	if (m_capacity - m_writePos >= m_maxPacketSize)
+		return;
+
+	Compact();
+}
+
+void RecvPacketBuffer::Compact()
+{
+	// 여기 오는 조각은 연속이고 최대 패킷보다 작다. 완성된 패킷은 이미 다
+	// 꺼내갔고 남은 건 헤더가 주장한 크기에 못 미치는 꼬리뿐이기 때문이다.
+	// 그래서 복사량이 최대 패킷을 넘지 않고, 링 끝에 닿았을 때만 일어난다.
+	memmove(m_buffer, m_buffer + m_readPos, m_storedSize);
+
+	m_readPos = 0;
+	m_writePos = m_storedSize;
+}
+
+PacketReadResult RecvPacketBuffer::ReadPacket(char*& outBuffer, uint32_t& outSize, uint16_t& outPacketId)
 {
 	outSize = 0;
 	outPacketId = 0;
@@ -148,16 +216,18 @@ bool RecvPacketBuffer::ReadPacket(char*& outBuffer, uint32_t& outSize, uint16_t&
 
 	PACKET_HEADER header{};
 	if (!PeekHeader(header))
-		return false;
+		return PacketReadResult::NeedMoreData;
 
-	if (header.packetSize < sizeof(PACKET_HEADER) || header.packetSize > RECV_PACKET_BUFFER_SIZE)
-		return false;
+	// 피어가 규칙 밖의 크기를 적어 보냈다. 이걸 NeedMoreData 로 뭉개면 그
+	// 세션은 영원히 이 헤더에 막힌 채 살아남으므로 위반으로 올려 보낸다.
+	if (header.packetSize < sizeof(PACKET_HEADER) || header.packetSize > m_maxPacketSize)
+		return PacketReadResult::Invalid;
 
 	if (m_storedSize < header.packetSize)
-		return false; // 아직 패킷 전체 수신 안됨
+		return PacketReadResult::NeedMoreData; // 아직 패킷 전체 수신 안됨
 
 	if (!m_packetMemoryPool)
-		return false;
+		return PacketReadResult::OutOfMemory;
 
 	// 패킷 메모리 버퍼 풀로 부터
 	// RecvPacketBuffer 의 m_buffer 에 저장된 패킷 데이터를 카피한다.
@@ -169,10 +239,10 @@ bool RecvPacketBuffer::ReadPacket(char*& outBuffer, uint32_t& outSize, uint16_t&
 	{
 		// 패킷 풀에서 메모리를 못 얻었다. 구체적 원인은 EngineMemoryPool 이 남긴다.
 		ENGINE_VIOLATION("failed to acquire %u bytes for an incoming packet, dropping it", header.packetSize);
-		return false;
+		return PacketReadResult::OutOfMemory;
 	}
 
-	uint32_t remainFirst = RECV_PACKET_BUFFER_SIZE - m_readPos;
+	uint32_t remainFirst = m_capacity - m_readPos;
 	if (header.packetSize <= remainFirst) [[likely]]
 	{
 		memcpy(packetMemory, m_buffer + m_readPos, header.packetSize);
@@ -188,9 +258,9 @@ bool RecvPacketBuffer::ReadPacket(char*& outBuffer, uint32_t& outSize, uint16_t&
 	outSize = header.packetSize;
 	outPacketId = header.packetId;
 
-	m_readPos = (m_readPos + header.packetSize) & (RECV_PACKET_BUFFER_SIZE - 1);
+	m_readPos = (m_readPos + header.packetSize) & m_capacityMask;
 	m_storedSize -= header.packetSize;
 
-	return true;
+	return PacketReadResult::Ok;
 }
 
