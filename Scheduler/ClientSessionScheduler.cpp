@@ -3,7 +3,7 @@
 #include "../Job/Job.h"
 #include "../Session/ClientSession.h"
 #include "../Session/SessionJobQueue.h"
-#include "../Memory/SlabMemoryPoolHelper.h"
+#include "../Memory/EngineMemoryPoolHelper.h"
 
 #include "../../Core/Util/Logger.h"
 
@@ -19,7 +19,7 @@ ClientSessionScheduler::~ClientSessionScheduler()
 	Finalize();
 }
 
-bool ClientSessionScheduler::Initialize(ClientSession* clientSession, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool)
+bool ClientSessionScheduler::Initialize(ClientSession* clientSession, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool)
 {
 	if (clientSession == nullptr || jobMemoryPool == nullptr)
 	{

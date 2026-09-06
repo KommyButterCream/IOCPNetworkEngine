@@ -6,8 +6,8 @@
 
 using namespace Core::Util;
 
-#include "../Memory/SlabMemoryPool.h"
-#include "../Memory/SlabMemoryPoolHelper.h"
+#include "../Memory/EngineMemoryPool.h"
+#include "../Memory/EngineMemoryPoolHelper.h"
 
 #include <memory.h>
 #include <assert.h> // for assert
@@ -17,7 +17,7 @@ RecvPacketBuffer::RecvPacketBuffer()
 {
 }
 
-bool RecvPacketBuffer::Initialize(SlabMemoryPool* packetMemoryPool)
+bool RecvPacketBuffer::Initialize(EngineMemoryPool* packetMemoryPool)
 {
 	static_assert((RECV_PACKET_BUFFER_SIZE & (RECV_PACKET_BUFFER_SIZE - 1)) == 0, "Buffer size must be power of 2");
 
@@ -167,7 +167,7 @@ bool RecvPacketBuffer::ReadPacket(char*& outBuffer, uint32_t& outSize, uint16_t&
 	//char* packetMemory = reinterpret_cast<char*>(m_packetMemoryPool->Acquire(header.packetSize));
 	if (!packetMemory)
 	{
-		// 패킷 풀에서 메모리를 못 얻었다. 구체적 원인은 SlabMemoryPool 이 남긴다.
+		// 패킷 풀에서 메모리를 못 얻었다. 구체적 원인은 EngineMemoryPool 이 남긴다.
 		ENGINE_VIOLATION("failed to acquire %u bytes for an incoming packet, dropping it", header.packetSize);
 		return false;
 	}

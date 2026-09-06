@@ -12,7 +12,7 @@
 #include "../Buffer/SendPacketQueue.h"
 #include "../Buffer/SendPacketPool.h"
 #include "../Buffer/HybridSendPacketPool.h"
-#include "../Memory/SlabMemoryPoolHelper.h"
+#include "../Memory/EngineMemoryPoolHelper.h"
 #include "../../Core/Util/Logger.h"
 
 #include "../Scheduler/ClientSessionScheduler.h"
@@ -27,7 +27,7 @@ using namespace Core::Util;
 
 namespace
 {
-	void ReleaseSendPacketData(SlabMemoryPool& packetMemoryPool, SlabMemoryPool& generalMemoryPool, SendPacketBuffer* packetBuffer)
+	void ReleaseSendPacketData(EngineMemoryPool& packetMemoryPool, EngineMemoryPool& generalMemoryPool, SendPacketBuffer* packetBuffer)
 	{
 		if (!packetBuffer || !packetBuffer->packetData)
 			return;
@@ -333,7 +333,7 @@ bool ClientSession::OnDisconnect()
 	return true;
 }
 
-bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool)
+bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool)
 {
 	m_jobMemoryPool = jobMemoryPool;
 	m_packetMemoryPool = packetMemoryPool;

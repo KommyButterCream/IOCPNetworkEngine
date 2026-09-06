@@ -51,7 +51,10 @@ public:
 	~SlabMemoryPool();
 
 public:
-	bool Initialize(const SlabConfig* configs, uint32_t slabCount);
+	// payloadAlignment 는 이 구현이 지원하지 않는다. 항상 16바이트로 잡는다.
+	// TlsMemoryPool 과 시그니처를 맞춰 두어야 EngineMemoryPool 스위치를
+	// 양쪽으로 뒤집어도 호출부가 그대로 컴파일된다.
+	bool Initialize(const SlabConfig* configs, uint32_t slabCount, uint32_t payloadAlignment = 16);
 	void Finalize();
 
 	void* Acquire(size_t size);

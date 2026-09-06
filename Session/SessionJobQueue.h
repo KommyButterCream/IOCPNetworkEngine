@@ -16,14 +16,14 @@
 #endif
 
 struct Job;
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 enum class SESSION_ROLE;
 
 // 세션별 JobQueue (singly-linked list) - SRWLock 으로 보호
 class IOCP_ENGINE_API SessionJobQueue
 {
 public:
-	SessionJobQueue(SESSION_ROLE sessionRole, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool);
+	SessionJobQueue(SESSION_ROLE sessionRole, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool);
 	~SessionJobQueue();
 
 private:
@@ -35,9 +35,9 @@ private:
 	CONDITION_VARIABLE m_cv = CONDITION_VARIABLE_INIT;
 	int32_t m_count = 0;
 
-	SlabMemoryPool* m_jobMemoryPool = nullptr;
-	SlabMemoryPool* m_packetMemoryPool = nullptr;
-	SlabMemoryPool* m_generalMemoryPool = nullptr;
+	EngineMemoryPool* m_jobMemoryPool = nullptr;
+	EngineMemoryPool* m_packetMemoryPool = nullptr;
+	EngineMemoryPool* m_generalMemoryPool = nullptr;
 
 	bool m_stopFlag = false;
 

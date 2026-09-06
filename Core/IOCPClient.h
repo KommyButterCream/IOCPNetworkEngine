@@ -14,7 +14,7 @@ struct OverlappedEx;
 class ISession;
 class ClientSession;
 class HybridSendPacketPool;
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 class ClientSessionScheduler;
 class PacketHandlerTable;
 class SessionContext;
@@ -46,9 +46,9 @@ private:
 	ClientSession* m_session = nullptr;
 
 	HybridSendPacketPool* m_hybridSendPacketPool = nullptr;
-	SlabMemoryPool* m_jobMemoryPool = nullptr;
-	SlabMemoryPool* m_packetMemoryPool = nullptr;
-	SlabMemoryPool* m_generalMemoryPool = nullptr;
+	EngineMemoryPool* m_jobMemoryPool = nullptr;
+	EngineMemoryPool* m_packetMemoryPool = nullptr;
+	EngineMemoryPool* m_generalMemoryPool = nullptr;
 	ClientSessionScheduler* m_clientSessionScheduler = nullptr;
 	PacketHandlerTable* m_packetHandlerTable = nullptr;
 	HandlerContext m_handlerContext = {};
@@ -107,9 +107,9 @@ private:
 
 public:
 	PacketHandlerTable* GetPacketHandlerTable() const;
-	SlabMemoryPool* GetJobMemoryPool() const;
-	SlabMemoryPool* GetPacketMemoryPool() const;
-	SlabMemoryPool* GetGeneralMemoryPool() const;
+	EngineMemoryPool* GetJobMemoryPool() const;
+	EngineMemoryPool* GetPacketMemoryPool() const;
+	EngineMemoryPool* GetGeneralMemoryPool() const;
 	const HandlerContext& GetHandlerContext() const;
 	ClientSession* GetClientSession() const;
 	virtual void* GetServiceContext();

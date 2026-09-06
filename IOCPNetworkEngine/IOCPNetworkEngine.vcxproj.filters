@@ -63,6 +63,9 @@
     <ClCompile Include="..\Memory\SlabMemoryPool.cpp">
       <Filter>Memory</Filter>
     </ClCompile>
+    <ClCompile Include="..\Memory\TlsMemoryPool.cpp">
+      <Filter>Memory</Filter>
+    </ClCompile>
     <ClCompile Include="..\Network\SocketOption.cpp">
       <Filter>Network</Filter>
     </ClCompile>
@@ -140,7 +143,16 @@
     <ClInclude Include="..\Memory\SlabMemoryPool.h">
       <Filter>Memory</Filter>
     </ClInclude>
-    <ClInclude Include="..\Memory\SlabMemoryPoolHelper.h">
+    <ClInclude Include="..\Memory\EngineMemoryPool.h">
+      <Filter>Memory</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Memory\EngineMemoryPoolFwd.h">
+      <Filter>Memory</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Memory\EngineMemoryPoolHelper.h">
+      <Filter>Memory</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Memory\TlsMemoryPool.h">
       <Filter>Memory</Filter>
     </ClInclude>
     <ClInclude Include="..\Network\OverlappedEx.h">

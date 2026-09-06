@@ -8,10 +8,10 @@ using namespace Core::Util;
 #include "SessionDefs.h"
 
 #include "../Job/Job.h"
-#include "../Memory/SlabMemoryPoolHelper.h"
+#include "../Memory/EngineMemoryPoolHelper.h"
 
 
-SessionJobQueue::SessionJobQueue(SESSION_ROLE sessionRole, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool)
+SessionJobQueue::SessionJobQueue(SESSION_ROLE sessionRole, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool)
 {
 	m_sessionRole = sessionRole;
 	m_jobMemoryPool = jobMemoryPool;

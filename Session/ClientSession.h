@@ -19,7 +19,7 @@ class RecvPacketBuffer;
 class SendPacketQueue;
 class SendPacketPool;
 class HybridSendPacketPool;
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 class ISessionEvent;
 
 #ifdef BUILD_IOCP_ENGINE_DLL
@@ -38,9 +38,9 @@ public:
 
 	// ClientSession 전용 멤버 변수
 private:
-	SlabMemoryPool* m_jobMemoryPool = nullptr;
-	SlabMemoryPool* m_packetMemoryPool = nullptr;
-	SlabMemoryPool* m_generalMemoryPool = nullptr;
+	EngineMemoryPool* m_jobMemoryPool = nullptr;
+	EngineMemoryPool* m_packetMemoryPool = nullptr;
+	EngineMemoryPool* m_generalMemoryPool = nullptr;
 
 	// Client Role
 	OverlappedEx m_connectOverlapped{};
@@ -86,7 +86,7 @@ public:
 
 	// ClientSession 전용 메서드
 public:
-	bool InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool);
+	bool InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool);
 
 	bool IsReady() const;
 	bool IsConnected() const;

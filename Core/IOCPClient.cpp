@@ -15,8 +15,8 @@
 
 #include "../Network/SocketOption.h"
 
-#include "../Memory/SlabMemoryPool.h"
-#include "../Memory/SlabMemoryPoolHelper.h"
+#include "../Memory/EngineMemoryPool.h"
+#include "../Memory/EngineMemoryPoolHelper.h"
 
 #include "../Buffer/RecvPacketBuffer.h"
 #include "../Buffer/HybridSendPacketPool.h"
@@ -82,17 +82,23 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port)
 
 	constexpr size_t JobObjectSize = sizeof(Job);
 	constexpr size_t AlignedJobObjectSize = (JobObjectSize + 63) & ~63;
-	SlabMemoryPool::SlabConfig configsJob[] = {
+	EngineMemoryPool::SlabConfig configsJob[] = {
 		{AlignedJobObjectSize, 1024}
 	};
 
-	m_jobMemoryPool = new SlabMemoryPool;
+	m_jobMemoryPool = new EngineMemoryPool;
 	if (!m_jobMemoryPool)
 		return false;
 
-	m_jobMemoryPool->Initialize(configsJob, _countof(configsJob));
+	// Job 은 __declspec(align(64)) 이므로 페이로드도 64바이트 정렬이어야 한다.
+	// 예전 풀은 16바이트만 보장해서 4개 중 1개만 실제로 정렬되어 있었다.
+	if (!m_jobMemoryPool->Initialize(configsJob, _countof(configsJob), alignof(Job)))
+	{
+		LOGE("failed to initialize the job memory pool");
+		return false;
+	}
 
-	SlabMemoryPool::SlabConfig configsPacket[] = {
+	EngineMemoryPool::SlabConfig configsPacket[] = {
 		{64, 1024},
 		{128, 1024},
 		{256, 1024},
@@ -105,19 +111,19 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port)
 		{MEMORY_SIZE_32K, 128},
 	};
 
-	m_packetMemoryPool = new SlabMemoryPool;
+	m_packetMemoryPool = new EngineMemoryPool;
 	if (!m_packetMemoryPool)
 		return false;
 
 	m_packetMemoryPool->Initialize(configsPacket, _countof(configsPacket));
 
-	SlabMemoryPool::SlabConfig configsImageBuffer[] = {
+	EngineMemoryPool::SlabConfig configsImageBuffer[] = {
 	{MEMORY_SIZE_1MB, 1},
 	//{MEMORY_SIZE_4MB, 100},
 	//{MEMORY_SIZE_8MB, 50}
 	};
 
-	m_generalMemoryPool = new SlabMemoryPool;
+	m_generalMemoryPool = new EngineMemoryPool;
 	if (!m_generalMemoryPool)
 		return false;
 
@@ -836,17 +842,17 @@ PacketHandlerTable* IOCPClient::GetPacketHandlerTable() const
 	return m_packetHandlerTable;
 }
 
-SlabMemoryPool* IOCPClient::GetJobMemoryPool() const
+EngineMemoryPool* IOCPClient::GetJobMemoryPool() const
 {
 	return m_jobMemoryPool;
 }
 
-SlabMemoryPool* IOCPClient::GetPacketMemoryPool() const
+EngineMemoryPool* IOCPClient::GetPacketMemoryPool() const
 {
 	return m_packetMemoryPool;
 }
 
-SlabMemoryPool* IOCPClient::GetGeneralMemoryPool() const
+EngineMemoryPool* IOCPClient::GetGeneralMemoryPool() const
 {
 	return m_generalMemoryPool;
 }

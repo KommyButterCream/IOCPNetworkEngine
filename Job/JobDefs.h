@@ -4,14 +4,14 @@
 
 class ISession;
 class IDBConnection;
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 class IOCPCore;
 
 struct HandlerContext
 {
-	SlabMemoryPool* jobMemoryPool = nullptr;
-	SlabMemoryPool* packetMemoryPool = nullptr;
-	SlabMemoryPool* generalMemoryPool = nullptr;
+	EngineMemoryPool* jobMemoryPool = nullptr;
+	EngineMemoryPool* packetMemoryPool = nullptr;
+	EngineMemoryPool* generalMemoryPool = nullptr;
 	void* serviceContext = nullptr;
 };
 

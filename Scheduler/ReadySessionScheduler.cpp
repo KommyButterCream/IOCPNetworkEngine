@@ -7,7 +7,7 @@
 #include "../Job/Job.h"
 #include "../Session/ClientSession.h"
 #include "../Session/SessionJobQueue.h"
-#include "../Memory/SlabMemoryPoolHelper.h"
+#include "../Memory/EngineMemoryPoolHelper.h"
 
 #include "../../Core/Util/Logger.h"
 
@@ -30,7 +30,7 @@ ReadySessionScheduler::~ReadySessionScheduler()
 	Finalize();
 }
 
-bool ReadySessionScheduler::Initialize(uint32_t workerCount, ReadySessionQueue* readySessionQueue, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool)
+bool ReadySessionScheduler::Initialize(uint32_t workerCount, ReadySessionQueue* readySessionQueue, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool)
 {
 	if (workerCount == 0 || readySessionQueue == nullptr || jobMemoryPool == nullptr)
 	{

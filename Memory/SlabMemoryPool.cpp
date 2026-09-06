@@ -19,9 +19,17 @@ SlabMemoryPool::~SlabMemoryPool()
 	Finalize();
 }
 
-bool SlabMemoryPool::Initialize(const SlabConfig* configs, uint32_t slabCount)
+bool SlabMemoryPool::Initialize(const SlabConfig* configs, uint32_t slabCount, uint32_t payloadAlignment)
 {
 	if (!configs || slabCount == 0 || m_initialized) return false;
+
+	if (payloadAlignment > MEMORY_ALIGNMENT)
+	{
+		// 이 구현은 16바이트 정렬만 만들 수 있다. 요청을 조용히 무시하면
+		// align(64) 타입이 어긋난 채로 돌아가므로 남겨야 한다.
+		LOGW("payload alignment %u was requested but this pool only guarantees %zu. the caller must switch to TlsMemoryPool",
+			payloadAlignment, MEMORY_ALIGNMENT);
+	}
 
 	// 1. Slab 구조체 배열 할당
 	m_slabs = static_cast<Slab*>(::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(Slab) * slabCount));

@@ -1,6 +1,6 @@
 ﻿#pragma once
 
-#include "SlabMemoryPool.h"
+#include "EngineMemoryPool.h"
 
 #include "../../Core/Util/Logger.h"
 
@@ -19,15 +19,15 @@ using namespace Core::Util;
 // (실측: 로그 억제 221k pkt/s -> 로그 켜짐 13k pkt/s)
 //
 // 그래서 개별 할당/해제는 LOGT(릴리스에서 컴파일 제거) 로만 남기고,
-// 실제 운영 지표는 SlabMemoryPool 이 누적하는 카운터로 본다.
-//   SlabMemoryPool::LogStats() -> 슬랩별 peak / 확장 횟수 / 미반환 수
-// 실패 원인 로그도 SlabMemoryPool::Acquire 안에서 남긴다.
+// 실제 운영 지표는 EngineMemoryPool 이 누적하는 카운터로 본다.
+//   EngineMemoryPool::LogStats() -> 슬랩별 peak / 확장 횟수 / 미반환 수
+// 실패 원인 로그도 EngineMemoryPool::Acquire 안에서 남긴다.
 
 namespace MEMORY_POOL
 {
 	// Utility helpers for Packet objects
 
-	inline void* CreatePacket(SlabMemoryPool& pool, size_t size)
+	inline void* CreatePacket(EngineMemoryPool& pool, size_t size)
 	{
 		// 메모리 풀에서 크기에 맞는 메모리를 찾아서 반환
 		void* memory = pool.Acquire(size);
@@ -37,7 +37,7 @@ namespace MEMORY_POOL
 		return memory;
 	}
 
-	inline void ReleasePacket(SlabMemoryPool& packetPool, SlabMemoryPool& generalPool, const void* memory)
+	inline void ReleasePacket(EngineMemoryPool& packetPool, EngineMemoryPool& generalPool, const void* memory)
 	{
 		// 사용이 끝난 메모리를 메모리풀에 반환
 		if (!memory)
@@ -50,7 +50,7 @@ namespace MEMORY_POOL
 
 	// Utility helpers for Job objects
 
-	inline Job* CreateJob(SlabMemoryPool& pool)
+	inline Job* CreateJob(EngineMemoryPool& pool)
 	{
 		// Job 메모리 버퍼를 버퍼풀로부터 반환
 		void* memory = pool.Acquire(sizeof(Job));
@@ -67,7 +67,7 @@ namespace MEMORY_POOL
 		return static_cast<Job*>(memory);
 	}
 
-	inline void ReleaseJob(SlabMemoryPool& pool, Job* job)
+	inline void ReleaseJob(EngineMemoryPool& pool, Job* job)
 	{
 		// 사용이 끝난 Job 메모리 버퍼를 버퍼풀에 반환
 		if (!job)

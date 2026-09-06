@@ -9,7 +9,7 @@
 #include "PreDefine.h"
 #include "SendPacketPool.h"
 
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 
 class SendPacketQueue
 {
@@ -17,7 +17,7 @@ public:
 	SendPacketQueue();
 	~SendPacketQueue();
 
-	bool Initialize(SendPacketPool* sendPacketPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool);
+	bool Initialize(SendPacketPool* sendPacketPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool);
 	void Finalize();
 
 	bool Enqueue(void** packetData, uint32_t packetSize);
@@ -41,8 +41,8 @@ private:
 
 	SendPacketBuffer** m_queue = nullptr;
 	SendPacketPool* m_packetPool = nullptr;
-	SlabMemoryPool* m_packetMemoryPool = nullptr;
-	SlabMemoryPool* m_generalMemoryPool = nullptr;
+	EngineMemoryPool* m_packetMemoryPool = nullptr;
+	EngineMemoryPool* m_generalMemoryPool = nullptr;
 
 	int32_t m_count = 0;
 };

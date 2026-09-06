@@ -5,11 +5,11 @@
 
 #include "SendPacketPool.h"
 
-#include "../Memory/SlabMemoryPoolHelper.h"
+#include "../Memory/EngineMemoryPoolHelper.h"
 
 namespace
 {
-	void ReleaseQueuedPacket(SlabMemoryPool& packetMemoryPool, SlabMemoryPool& generalMemoryPool, SendPacketBuffer* packetBuffer)
+	void ReleaseQueuedPacket(EngineMemoryPool& packetMemoryPool, EngineMemoryPool& generalMemoryPool, SendPacketBuffer* packetBuffer)
 	{
 		if (!packetBuffer || !packetBuffer->packetData)
 			return;
@@ -31,7 +31,7 @@ SendPacketQueue::SendPacketQueue()
 {
 }
 
-bool SendPacketQueue::Initialize(SendPacketPool* sendPacketPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool)
+bool SendPacketQueue::Initialize(SendPacketPool* sendPacketPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool)
 {
 	static_assert((SEND_PACKET_QUEUE_SIZE & (SEND_PACKET_QUEUE_SIZE - 1)) == 0, "Buffer size must be power of 2");
 

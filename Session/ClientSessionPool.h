@@ -13,7 +13,7 @@ struct SessionNode;
 class ISession;
 class ClientSession;
 class HybridSendPacketPool;
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 
 class ClientSessionPool
 {
@@ -27,7 +27,7 @@ private:
 	CloseSocketFunc m_closeSocketFunc = nullptr;
 
 public:
-	explicit ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hybridSendPacketPool, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool);
+	explicit ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool);
 	~ClientSessionPool();
 
 	// 세션 획득

@@ -9,7 +9,7 @@
 
 #include "../../Core/Concurrency/ThreadBase.h"
 
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 class ClientSession;
 
 // 세션 1개의 JobQueue 를 처리하는 전용 스레드.
@@ -22,15 +22,15 @@ public:
 	~ClientSessionScheduler() override;
 
 public:
-	bool Initialize(ClientSession* clientSession, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool);
+	bool Initialize(ClientSession* clientSession, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool);
 	void Finalize();
 
 protected:
 	void Run() override;
 
 private:
-	SlabMemoryPool* m_jobMemoryPool = nullptr;
+	EngineMemoryPool* m_jobMemoryPool = nullptr;
 	ClientSession* m_clientSession = nullptr;
-	SlabMemoryPool* m_packetMemoryPool = nullptr;
-	SlabMemoryPool* m_generalMemoryPool = nullptr;
+	EngineMemoryPool* m_packetMemoryPool = nullptr;
+	EngineMemoryPool* m_generalMemoryPool = nullptr;
 };

@@ -6,7 +6,7 @@
 
 #include "../Protocol/PacketHeader.h"
 
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 
 class RecvPacketBuffer
 {
@@ -20,7 +20,7 @@ public:
 	RecvPacketBuffer& operator=(RecvPacketBuffer&&) = delete;
 
 private:
-	SlabMemoryPool* m_packetMemoryPool = nullptr;
+	EngineMemoryPool* m_packetMemoryPool = nullptr;
 
 	char* m_buffer = nullptr;
 	uint32_t m_writePos = 0;
@@ -28,7 +28,7 @@ private:
 	uint32_t m_storedSize = 0;
 
 public:
-	bool Initialize(SlabMemoryPool* packetMemoryPool);
+	bool Initialize(EngineMemoryPool* packetMemoryPool);
 	void Finalize();
 	void Reset();
 

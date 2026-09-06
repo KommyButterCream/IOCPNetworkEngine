@@ -13,7 +13,7 @@ class ISession;
 class ClientSessionPool;
 class AcceptSessionPool;
 class HybridSendPacketPool;
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 
 class SessionManager : public ISessionEvent
 {
@@ -35,7 +35,7 @@ private:
 	uint32_t m_clientSessionCount = 0;
 
 public:
-	bool Initialize(const uint32_t acceptSessionCount, const uint32_t clientSessionCount, HybridSendPacketPool* hybridSendPacketPool, SlabMemoryPool* jobMemoryPool, SlabMemoryPool* packetMemoryPool, SlabMemoryPool* generalMemoryPool, CloseSocketFunc closeSocketFunc);
+	bool Initialize(const uint32_t acceptSessionCount, const uint32_t clientSessionCount, HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, CloseSocketFunc closeSocketFunc);
 	void Finalize();
 
 	// Accept Session //

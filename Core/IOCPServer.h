@@ -16,7 +16,7 @@ class HybridSendPacketPool;
 class SessionManager;
 class ReadySessionQueue;
 class ReadySessionScheduler;
-class SlabMemoryPool;
+#include "../Memory/EngineMemoryPoolFwd.h"
 class HeartbeatThread;
 
 struct OverlappedEx;
@@ -46,9 +46,9 @@ private:
 	ReadySessionScheduler* m_readySessionScheduler = nullptr;
 	HeartbeatThread* m_heartbeatThread = nullptr;
 	PacketHandlerTable* m_packetHandlerTable = nullptr;
-	SlabMemoryPool* m_jobMemoryPool = nullptr;
-	SlabMemoryPool* m_packetMemoryPool = nullptr;
-	SlabMemoryPool* m_generalMemoryPool = nullptr;
+	EngineMemoryPool* m_jobMemoryPool = nullptr;
+	EngineMemoryPool* m_packetMemoryPool = nullptr;
+	EngineMemoryPool* m_generalMemoryPool = nullptr;
 
 	HandlerContext m_handlerContext = {};
 
@@ -117,9 +117,9 @@ private:
 protected:
 	ReadySessionQueue* GetReadySessionQueue() const;
 	PacketHandlerTable* GetPacketHandlerTable() const;
-	SlabMemoryPool* GetJobMemoryPool() const;
-	SlabMemoryPool* GetPacketMemoryPool() const;
-	SlabMemoryPool* GetGeneralMemoryPool() const;
+	EngineMemoryPool* GetJobMemoryPool() const;
+	EngineMemoryPool* GetPacketMemoryPool() const;
+	EngineMemoryPool* GetGeneralMemoryPool() const;
 	const HandlerContext& GetHandlerContext() const;
 	virtual void* GetServiceContext();
 
