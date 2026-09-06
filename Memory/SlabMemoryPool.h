@@ -61,6 +61,13 @@ public:
 	void Release(const void* payload);
 
 	uint32_t GetSlabCount() const { return m_slabCount; }
+
+	// TlsMemoryPool 과 이름을 맞춰 두어야 EngineMemoryPool 스위치를 양쪽으로
+	// 뒤집어도 호출부가 그대로 컴파일된다. 이 클래스는 A/B 비교용으로만 남아 있다.
+	using BinConfig = SlabConfig;
+	using BinStats = SlabStats;
+	uint32_t GetBinCount() const { return m_slabCount; }
+	bool GetBinStats(uint32_t index, SlabStats& out) const { return GetSlabStats(index, out); }
 	bool GetSlabStats(uint32_t slabIndex, SlabStats& outStats) const;
 
 	// 전체 슬랩 지표를 로그로 한 번에 덤프한다.

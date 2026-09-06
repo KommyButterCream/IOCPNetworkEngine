@@ -63,6 +63,12 @@
     <ClCompile Include="..\Memory\SlabMemoryPool.cpp">
       <Filter>Memory</Filter>
     </ClCompile>
+    <ClCompile Include="..\Memory\GlobalBlockPool.cpp">
+      <Filter>Memory</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Memory\ThreadBlockCache.cpp">
+      <Filter>Memory</Filter>
+    </ClCompile>
     <ClCompile Include="..\Memory\TlsMemoryPool.cpp">
       <Filter>Memory</Filter>
     </ClCompile>
@@ -150,6 +156,18 @@
       <Filter>Memory</Filter>
     </ClInclude>
     <ClInclude Include="..\Memory\EngineMemoryPoolHelper.h">
+      <Filter>Memory</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Memory\BlockLayout.h">
+      <Filter>Memory</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Memory\GlobalBlockPool.h">
+      <Filter>Memory</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Memory\SizeBin.h">
+      <Filter>Memory</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Memory\ThreadBlockCache.h">
       <Filter>Memory</Filter>
     </ClInclude>
     <ClInclude Include="..\Memory\TlsMemoryPool.h">

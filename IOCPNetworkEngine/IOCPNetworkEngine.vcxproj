@@ -29,6 +29,8 @@
     <ClCompile Include="..\Core\IOCPServer.cpp" />
     <ClCompile Include="..\HandlerTable\PacketHandlerTable.cpp" />
     <ClCompile Include="..\Memory\SlabMemoryPool.cpp" />
+    <ClCompile Include="..\Memory\GlobalBlockPool.cpp" />
+    <ClCompile Include="..\Memory\ThreadBlockCache.cpp" />
     <ClCompile Include="..\Memory\TlsMemoryPool.cpp" />
     <ClCompile Include="..\Network\SocketOption.cpp" />
     <ClCompile Include="..\Scheduler\ClientSessionScheduler.cpp" />
@@ -60,6 +62,10 @@
     <ClInclude Include="..\Memory\EngineMemoryPool.h" />
     <ClInclude Include="..\Memory\EngineMemoryPoolFwd.h" />
     <ClInclude Include="..\Memory\EngineMemoryPoolHelper.h" />
+    <ClInclude Include="..\Memory\BlockLayout.h" />
+    <ClInclude Include="..\Memory\GlobalBlockPool.h" />
+    <ClInclude Include="..\Memory\SizeBin.h" />
+    <ClInclude Include="..\Memory\ThreadBlockCache.h" />
     <ClInclude Include="..\Memory\TlsMemoryPool.h" />
     <ClInclude Include="..\Network\OverlappedEx.h" />
     <ClInclude Include="..\Network\SocketOption.h" />
