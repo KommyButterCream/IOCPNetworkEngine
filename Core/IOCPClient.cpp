@@ -150,7 +150,7 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 	m_handlerContext.generalMemoryPool = GetGeneralMemoryPool();
 	m_handlerContext.serviceContext = GetServiceContext();
 
-	m_packetHandlerTable = new PacketHandlerTable(m_handlerContext);
+	m_packetHandlerTable = new PacketHandlerTable();
 	if (!m_packetHandlerTable)
 		return false;
 

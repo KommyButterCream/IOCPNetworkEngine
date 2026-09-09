@@ -2,8 +2,8 @@
 
 #include <stdint.h>
 
+#include "../Job/JobDefs.h" // for PacketHandlerFunc
 #include "../Protocol/PacketID.h"
-#include "../Job/JobDefs.h"
 
 #ifdef BUILD_IOCP_ENGINE_DLL
 #define IOCP_ENGINE_API __declspec(dllexport)
@@ -13,13 +13,12 @@
 
 class IOCP_ENGINE_API PacketHandlerTable
 {
-protected:
-	PacketHandlerFunc m_handlerTable[ToPacketID(PACKET_ID::MAX_PACKET_ID)];
-	HandlerContext m_handlerContext = {};
+private:
+	PacketHandlerFunc m_handlerTable[ToPacketID(PACKET_ID::MAX_PACKET_ID)] = {};
 
 public:
-	PacketHandlerTable(const HandlerContext& context);
-	virtual ~PacketHandlerTable();
+	PacketHandlerTable() = default;
+	virtual ~PacketHandlerTable() = default;
 
 public:
 	bool Register(uint16_t packetId, PacketHandlerFunc handler);
