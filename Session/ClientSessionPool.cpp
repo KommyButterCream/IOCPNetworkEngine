@@ -5,6 +5,8 @@
 #include "../Diagnostics/EngineAssert.h"
 #include "SessionNode.h"
 
+#include <string.h> // for strncmp
+
 #include "../../Core/Sync/SRWLockGuard.h"
 #include "../../Core/Util/Logger.h"
 
@@ -165,6 +167,53 @@ bool ClientSessionPool::IsSessionFull() const
 {
 	Core::Sync::SRWReadLockGuard lockguard(m_lock);
 	return (m_freeList == nullptr);
+}
+
+uint32_t ClientSessionPool::GetInUseCount() const
+{
+	if (!m_nodes)
+		return 0;
+
+	uint32_t count = 0;
+
+	for (uint32_t i = 0; i < m_capacity; ++i)
+	{
+		// poolState 는 Interlocked 로만 전이하므로 원자적으로 읽으면 된다.
+		// 세는 도중에 값이 바뀔 수 있어 결과는 근사치다. 접속 수용 판단은
+		// 어차피 다음 순간에 또 달라지므로 근사치로 충분하다.
+		if (::InterlockedCompareExchange(
+			const_cast<volatile LONG*>(&m_nodes[i].poolState), 0, 0) != SESSION_POOL_FREE)
+		{
+			++count;
+		}
+	}
+
+	return count;
+}
+
+uint32_t ClientSessionPool::CountSessionsFromAddress(const char* ipAddress) const
+{
+	if (!m_nodes || !m_sessions || !ipAddress || ipAddress[0] == '\0')
+		return 0;
+
+	uint32_t count = 0;
+
+	for (uint32_t i = 0; i < m_capacity; ++i)
+	{
+		if (::InterlockedCompareExchange(
+			const_cast<volatile LONG*>(&m_nodes[i].poolState), 0, 0) == SESSION_POOL_FREE)
+		{
+			continue;
+		}
+
+		// 임대 중인 세션의 주소만 본다. 반납된 세션의 주소는 지워진다.
+		if (::strncmp(m_sessions[i].GetClientIPAddress(), ipAddress, INET_ADDRSTRLEN) == 0)
+		{
+			++count;
+		}
+	}
+
+	return count;
 }
 
 ISession* ClientSessionPool::GetSession(const uint32_t sessionId)

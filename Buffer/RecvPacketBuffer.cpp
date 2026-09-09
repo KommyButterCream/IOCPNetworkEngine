@@ -214,7 +214,8 @@ PacketReadResult RecvPacketBuffer::ReadPacket(char*& outBuffer, uint32_t& outSiz
 	outPacketId = 0;
 	outBuffer = nullptr;
 
-	PACKET_HEADER header{};
+	PACKET_HEADER header = {};
+
 	if (!PeekHeader(header))
 		return PacketReadResult::NeedMoreData;
 

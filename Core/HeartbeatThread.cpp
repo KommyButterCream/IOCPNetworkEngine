@@ -9,12 +9,15 @@
 
 using namespace Core::Util;
 
-HeartbeatThread::HeartbeatThread(SessionManager* sessionManager, uint64_t checkInterval_ms, uint64_t heartbeatTimeout_ms)
+HeartbeatThread::HeartbeatThread(SessionManager* sessionManager, uint64_t checkInterval_ms, uint64_t heartbeatTimeout_ms,
+	PeriodicMaintenanceFunc maintenanceFunc, void* maintenanceContext)
 	: ThreadBase(L"HeartbeatThread")
 {
 	m_sessionManager = sessionManager;
 	m_checkInterval_ms = checkInterval_ms;
 	m_heartbeatTimeout_ms = heartbeatTimeout_ms;
+	m_maintenanceFunc = maintenanceFunc;
+	m_maintenanceContext = maintenanceContext;
 }
 
 void HeartbeatThread::SetCheckInterval(uint64_t checkInterval_ms)
@@ -63,6 +66,13 @@ void HeartbeatThread::Run()
 		if (disconnectedCount > 0)
 		{
 			LOGW("disconnected %u zombie sessions (timeout %llu ms)", disconnectedCount, m_heartbeatTimeout_ms);
+		}
+
+		// 주기 점검에 얹은 일. 지금은 비어 버린 accept 슬롯 보충이 여기로
+		// 온다. 이 스레드가 단일이라는 점이 그 작업의 안전 조건이다.
+		if (m_maintenanceFunc)
+		{
+			m_maintenanceFunc(m_maintenanceContext);
 		}
 	}
 }

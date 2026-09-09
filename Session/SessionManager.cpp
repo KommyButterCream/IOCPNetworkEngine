@@ -57,7 +57,7 @@ void SessionManager::Finalize()
 	}
 }
 
-ISession* SessionManager::GetAcceptSession(const uint32_t sessionId)
+AcceptSession* SessionManager::GetAcceptSession(const uint32_t sessionId)
 {
 	if (!m_acceptSessionPool)
 		return nullptr;
@@ -92,6 +92,22 @@ bool SessionManager::WaitForAllAcceptIOCancelComplete(const uint32_t timeout_ms)
 bool SessionManager::IsClientSessionFull() const
 {
 	return m_clientSessionPool->IsSessionFull();
+}
+
+uint32_t SessionManager::GetClientSessionInUseCount() const
+{
+	if (!m_clientSessionPool)
+		return 0;
+
+	return m_clientSessionPool->GetInUseCount();
+}
+
+uint32_t SessionManager::CountClientSessionsFromAddress(const char* ipAddress) const
+{
+	if (!m_clientSessionPool)
+		return 0;
+
+	return m_clientSessionPool->CountSessionsFromAddress(ipAddress);
 }
 
 ISession* SessionManager::GetClientSession(const uint32_t sessionId)

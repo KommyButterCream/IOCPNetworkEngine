@@ -48,7 +48,7 @@ IOCPServer::~IOCPServer()
 	StopServer();
 }
 
-bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount, const SessionBufferConfig& bufferConfig)
+bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount, const SessionBufferConfig& bufferConfig, const ConnectionPolicyConfig& policyConfig)
 {
 	// 설정 오류는 아무것도 잡기 전에 걸러낸다. 세션 생성 단계까지 끌고 가면
 	// 세션을 하나도 못 잡는 서버가 정상 기동한 것처럼 보인다.
@@ -59,6 +59,20 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 			bufferConfig.maxSendPacketSize, bufferConfig.sendQueueDepth);
 		return false;
 	}
+
+	// serviceCapacity 가 세션 풀보다 크면 아무 효과가 없다. 그런 설정은
+	// "제한을 걸었다" 고 믿게 만들므로 기동을 실패시킨다.
+	if (policyConfig.serviceCapacity > maxConnectionCount)
+	{
+		LOGE("service capacity %u exceeds the session pool capacity %u",
+			policyConfig.serviceCapacity, maxConnectionCount);
+		return false;
+	}
+
+	m_connectionPolicy = policyConfig;
+
+	LOGI("connection policy : service capacity %u (0 = pool capacity %u), max per address %u (0 = unlimited)",
+		m_connectionPolicy.serviceCapacity, maxConnectionCount, m_connectionPolicy.maxConnectionsPerAddress);
 
 	SetIOCPThreadCount(::GetMaximumProcessorCount(ALL_PROCESSOR_GROUPS));
 
@@ -174,8 +188,20 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 	if (!m_sessionManager)
 		return false;
 
-	//::GetMaximumProcessorCount(ALL_PROCESSOR_GROUPS) / 2;
-	if (!m_sessionManager->Initialize(1, maxConnectionCount, m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, IOCPCore::CloseSocketHandle, bufferConfig))
+	constexpr uint32_t PreferredAcceptSlotCount = 16;
+
+	uint32_t acceptSlotCount = maxConnectionCount < PreferredAcceptSlotCount
+		? maxConnectionCount
+		: PreferredAcceptSlotCount;
+
+	if (acceptSlotCount == 0)
+		acceptSlotCount = 1;
+
+	m_desiredAcceptCount = acceptSlotCount;
+
+	LOGI("accept slots %u (max connections %u)", acceptSlotCount, maxConnectionCount);
+
+	if (!m_sessionManager->Initialize(acceptSlotCount, maxConnectionCount, m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, IOCPCore::CloseSocketHandle, bufferConfig))
 		return false;
 
 	if (!PrepareAccept())
@@ -185,7 +211,11 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 
 	constexpr uint64_t HeartbeatCheckInterval_ms = 5'000;
 	constexpr uint64_t HeartbeatTimeout_ms = 15'000;
-	m_heartbeatThread = new HeartbeatThread(m_sessionManager, HeartbeatCheckInterval_ms, HeartbeatTimeout_ms);
+	// 주기 점검에 accept 슬롯 보충을 얹는다. 걸기가 실패해 비어 버린 슬롯은
+	// 스스로 복구되지 않으므로, 누군가 다시 걸어 주어야 한다.
+	// 이 스레드가 단일이라는 점이 그 작업의 안전 조건이다 (RefillAcceptSlots 주석 참고).
+	m_heartbeatThread = new HeartbeatThread(m_sessionManager, HeartbeatCheckInterval_ms, HeartbeatTimeout_ms,
+		[](void* context) { static_cast<IOCPServer*>(context)->RefillAcceptSlots(); }, this);
 	if (!m_heartbeatThread)
 	{
 		return false;
@@ -482,8 +512,7 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 {
 	LOGT("accept completed on accept session %u", sessionId);
 
-	ISession* session = m_sessionManager->GetAcceptSession(sessionId);
-	AcceptSession* acceptSession = dynamic_cast<AcceptSession*>(session);
+	AcceptSession* acceptSession = m_sessionManager->GetAcceptSession(sessionId);
 
 	if (!acceptSession)
 	{
@@ -494,6 +523,14 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 	}
 
 	acceptSession->OnAccept();
+
+	// 완료된 AcceptEx 는 더 이상 걸려 있지 않다. 아래에서 PostAccept 가
+	// 성공하면 다시 올라간다.
+	//
+	// IO 카운트(DecrementIO)와 달리 이건 순수한 계량이라 여기서 먼저 내려도
+	// 된다. 고갈 경보는 다시 걸기를 시도한 뒤에 확인하므로 이 사이의 일시적
+	// 감소를 고갈로 오해하지 않는다.
+	::InterlockedDecrement(&m_postedAcceptCount);
 
 	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
 	{
@@ -508,6 +545,76 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 		acceptSession->ResetSession();
 
 		return;
+	}
+
+	// 원격 주소를 먼저 읽어 둔다. 예전에는 세션을 임대한 뒤에 읽었는데,
+	// 주소당 접속 수 제한은 세션을 잡기 전에 판단해야 한다. 세션을 먼저
+	// 잡으면 거절할 접속이 잠깐이라도 슬롯을 차지한다.
+	char strIPAddress[INET_ADDRSTRLEN] = { 0, };
+	uint16_t remotePort = 0;
+
+	if (acceptSession->GetAcceptBuffer() && m_getAcceptExSockAddrs)
+	{
+		sockaddr_in* localAddr = nullptr;
+		sockaddr_in* remoteAddr = nullptr;
+		int localLen = 0;
+		int remoteLen = 0;
+		const int addrSize = sizeof(sockaddr_in) + 16;
+
+		m_getAcceptExSockAddrs(
+			acceptSession->GetAcceptBuffer(),
+			0,
+			addrSize,   // local address length
+			addrSize,   // remote address length
+			(sockaddr**)&localAddr, &localLen,
+			(sockaddr**)&remoteAddr, &remoteLen
+		);
+
+		if (remoteAddr != nullptr)
+		{
+			if (::inet_ntop(AF_INET, &remoteAddr->sin_addr, strIPAddress, sizeof(strIPAddress)))
+			{
+				remotePort = ::ntohs(remoteAddr->sin_port);
+
+				LOGT("accepted a connection from %s:%u", strIPAddress, remotePort);
+			}
+		}
+	}
+
+	// 주소당 동시 접속 제한. 한 주소가 세션 풀을 통째로 채우는 것을 막는다.
+	// 세션을 잡기 전에 걸러야 의미가 있다.
+	if (m_connectionPolicy.maxConnectionsPerAddress > 0 && strIPAddress[0] != '\0')
+	{
+		const uint32_t existing = m_sessionManager->CountClientSessionsFromAddress(strIPAddress);
+
+		if (existing >= m_connectionPolicy.maxConnectionsPerAddress)
+		{
+			LOGW("rejected a connection from %s : %u connections already (limit %u)",
+				strIPAddress, existing, m_connectionPolicy.maxConnectionsPerAddress);
+
+			IOCPCore::CloseSocketHandle(acceptSession->DetachSocket());
+
+			if (!acceptSession->OnDisconnect())
+			{
+				ENGINE_VIOLATION("accept session %u OnDisconnect reported failure", acceptSession->GetSessionID());
+			}
+
+			acceptSession->ResetSession();
+
+			const bool nextAcceptPosted = PostAccept(acceptSession);
+
+			acceptSession->DecrementIO();
+
+			// 걸려 있는 AcceptEx 가 하나도 없으면 새 접속을 못 받는 상태다.
+			ReportAcceptStarvationIfNeeded();
+
+			if (!nextAcceptPosted)
+			{
+				LOGE("failed to post the next AcceptEx after rejecting a connection (per-address limit)");
+			}
+
+			return;
+		}
 	}
 
 	ClientSession* clientSession = nullptr;
@@ -535,11 +642,20 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 			acceptSession->ResetSession();
 
-			if (!PostAccept(acceptSession))
-			{
-				LOGE("failed to re-arm AcceptEx after the client session pool handed out nothing");
+			const bool nextAcceptPosted = PostAccept(acceptSession);
 
-				//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post accept");
+			// 완료된 AcceptEx 1건에 대한 우리 몫의 카운트를 내린다.
+			// 다음 accept 를 건 뒤에 내리는 이유는 recv/send 와 같다 — 먼저 내리면
+			// 그 사이 카운트가 0 이 되어 종료 시의 취소 대기가 통과한다.
+			acceptSession->DecrementIO();
+
+			// 걸려 있는 AcceptEx 가 하나도 없으면 새 접속을 못 받는 상태다.
+			ReportAcceptStarvationIfNeeded();
+
+			if (!nextAcceptPosted)
+			{
+				LOGE("failed to post the next AcceptEx after the client session pool handed out nothing");
+
 				return;
 			}
 		}
@@ -548,40 +664,10 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 			// Client Session 획득에 성공한 경우
 			// socket 을 붙이고 IOCP 에 등록 후 PostRecv 하러 간다.
 
-			sockaddr_in* localAddr = nullptr;
-			sockaddr_in* remoteAddr = nullptr;
-			int localLen = 0, remoteLen = 0;
-			int addrSize = sizeof(sockaddr_in) + 16;
-
-			char strIPAddress[INET_ADDRSTRLEN] = { 0, };
-			uint16_t port = 0;
-
-			if (acceptSession->GetAcceptBuffer())
-			{
-				m_getAcceptExSockAddrs(
-					acceptSession->GetAcceptBuffer(),
-					0,
-					addrSize,   // local address length
-					addrSize,   // remote address length
-					(sockaddr**)&localAddr, &localLen,
-					(sockaddr**)&remoteAddr, &remoteLen
-				);
-
-				if (remoteAddr != nullptr)
-				{
-					// 네트워크 바이트 순서의 주소를 문자열로 변환
-					if (::inet_ntop(AF_INET, &remoteAddr->sin_addr, strIPAddress, sizeof(strIPAddress)))
-					{
-						port = ::ntohs(remoteAddr->sin_port);
-
-						LOGT("accepted a connection from %s:%u", strIPAddress, port);
-					}
-				}
-			}
-
+			// 주소는 이 함수 앞부분에서 이미 읽어 두었다. (주소당 제한을
+			// 세션 임대 전에 판단해야 해서 앞으로 옮겼다)
 
 			SOCKET acceptedSocket = acceptSession->DetachSocket();
-			acceptSession->ResetSession();
 
 			if (clientSession->GetClientSocket() != INVALID_SOCKET || clientSession->GetServerSessionState() != ServerSessionState::CONNECT_READY)
 			{
@@ -590,10 +676,10 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 					clientSession->GetSessionID(), static_cast<int>(clientSession->GetClientSocket()), static_cast<int>(clientSession->GetServerSessionState()));
 			}
 
-			LOGI("socket %d attached to session %u (via accept session %u)", (int)acceptedSocket, clientSession->GetSessionID(), session->GetSessionID());
+			LOGI("socket %d attached to session %u (via accept session %u)", (int)acceptedSocket, clientSession->GetSessionID(), acceptSession->GetSessionID());
 
 			clientSession->AttachSocket(acceptedSocket);
-			clientSession->SetRemoteAddress(strIPAddress, port);
+			clientSession->SetRemoteAddress(strIPAddress, remotePort);
 
 			// Session 과 1:1 대응하는 User 를 초기화 한다.
 			// Session 은 네트워크 담당, User 는 서비스 로직을 담당한다.
@@ -605,11 +691,20 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 			//}
 			//clientSession->SetUser(pUser);
 
-			if (!PostAccept(acceptSession))
-			{
-				LOGE("failed to re-arm AcceptEx after attaching the accepted socket");
+			const bool nextAcceptPosted = PostAccept(acceptSession);
 
-				//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post accept");
+			// 완료된 AcceptEx 1건에 대한 우리 몫의 카운트를 내린다.
+			// 이게 빠져 있어서 수락 1건마다 카운트가 +1 로 새고, 종료 시
+			// WaitForIOCancelComplete 가 0 을 못 봐서 10초씩 태웠다.
+			acceptSession->DecrementIO();
+
+			// 걸려 있는 AcceptEx 가 하나도 없으면 새 접속을 못 받는 상태다.
+			ReportAcceptStarvationIfNeeded();
+
+			if (!nextAcceptPosted)
+			{
+				LOGE("failed to post the next AcceptEx after attaching the accepted socket");
+
 				return;
 			}
 		}
@@ -619,7 +714,7 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 		// Client Session Pool 이 여유 없는 경우
 		// 해당 연결을 강제 종료 처리 후 Accept 를 걸어 준다.
 
-		LOGW("accept session %u rejected a connection : the client session pool is full", session->GetSessionID());
+		LOGW("accept session %u rejected a connection : the client session pool is full", acceptSession->GetSessionID());
 
 		IOCPCore::CloseSocketHandle(acceptSession->DetachSocket());
 
@@ -630,13 +725,19 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 		acceptSession->ResetSession();
 
-		if (!PostAccept(acceptSession))
-		{
-			LOGE("failed to re-arm AcceptEx after rejecting a connection (pool full)");
+		const bool nextAcceptPosted = PostAccept(acceptSession);
 
-			//Log::log(LogLevel::LOG_ERROR, "[%s] Failed to post accept");
-			return;
+		// 완료된 AcceptEx 1건에 대한 우리 몫의 카운트를 내린다.
+		acceptSession->DecrementIO();
+
+		// 걸려 있는 AcceptEx 가 하나도 없으면 새 접속을 못 받는 상태다.
+		ReportAcceptStarvationIfNeeded();
+
+		if (!nextAcceptPosted)
+		{
+			LOGE("failed to post the next AcceptEx after rejecting a connection (pool full)");
 		}
+
 		return;
 	}
 
@@ -698,9 +799,7 @@ void IOCPServer::HandleAcceptIOCancelled(uint32_t sessionId)
 {
 	LOGW("AcceptEx was cancelled on the listen socket");
 
-	ISession* session = m_sessionManager->GetAcceptSession(sessionId);
-
-	AcceptSession* acceptSession = dynamic_cast<AcceptSession*>(session);
+	AcceptSession* acceptSession = m_sessionManager->GetAcceptSession(sessionId);
 
 	if (!acceptSession)
 	{
@@ -710,6 +809,9 @@ void IOCPServer::HandleAcceptIOCancelled(uint32_t sessionId)
 	}
 
 	acceptSession->SetAcceptSessionState(AcceptSessionState::ACCEPT_ABORTED);
+
+	// 취소된 AcceptEx 는 더 이상 걸려 있지 않다.
+	::InterlockedDecrement(&m_postedAcceptCount);
 	acceptSession->DecrementIO();
 }
 
@@ -804,11 +906,22 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 
 		if (IsSystemPacketId(packetId))
 		{
-			const bool handled = HandleSystemPacket(clientSession, packetId, packetDataByMemoryPool, packetSize);
+			const SystemPacketResult systemResult = HandleSystemPacket(clientSession, packetId, packetDataByMemoryPool, packetSize);
 
 			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
 
-			if (!handled)
+			if (systemResult == SystemPacketResult::Rejected)
+			{
+				// 거절 응답을 이미 보냈다. 오류가 아니므로 ERROR 로 올리지 않고,
+				// 세션은 정리한다. 이게 없으면 거절된 접속이 하트비트
+				// 타임아웃까지 슬롯을 붙든다.
+				LOGI("session %u rejected by the engine (PacketID : %u), releasing it",
+					clientSession->GetSessionID(), packetId);
+				releaseSessionAfterHandling = true;
+				break;
+			}
+
+			if (systemResult != SystemPacketResult::Ok)
 			{
 				LOGE("session %u engine packet handling failed (PacketID : %u)", clientSession->GetSessionID(), packetId);
 				releaseSessionAfterHandling = true;
@@ -839,7 +952,7 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 		// 그러므로 즉시 반납한다. (이전에는 로그만 남기고 방치했다)
 		if (!clientSession->PostReceive())
 		{
-			LOGE("session %u failed to re-arm recv, releasing the session instead of leaving it idle",
+			LOGE("session %u failed to post the next recv, releasing the session instead of leaving it idle",
 				clientSession->GetSessionID());
 			releaseSessionAfterHandling = true;
 		}
@@ -1116,7 +1229,7 @@ bool IOCPServer::PrepareAccept()
 
 	for (uint32_t i = 0; i < maxAcceptSessionCount; i++)
 	{
-		ISession* session = m_sessionManager->GetAcceptSession(i);
+		AcceptSession* session = m_sessionManager->GetAcceptSession(i);
 
 		if (!session)
 		{
@@ -1153,7 +1266,7 @@ bool IOCPServer::PrepareAccept()
 
 bool IOCPServer::PrepareAccept(uint32_t sessionId)
 {
-	ISession* session = m_sessionManager->GetAcceptSession(sessionId);
+	AcceptSession* session = m_sessionManager->GetAcceptSession(sessionId);
 
 	if (!session)
 	{
@@ -1188,25 +1301,16 @@ bool IOCPServer::PrepareAccept(uint32_t sessionId)
 	return true;
 }
 
-bool IOCPServer::PostAccept(ISession* session)
+bool IOCPServer::PostAccept(AcceptSession* acceptSession)
 {
-	if (!session)
-	{
-		LOGE("accept session cast failed : the session is not an AcceptSession");
-
-		return false;
-	}
-
-	AcceptSession* acceptSession = dynamic_cast<AcceptSession*>(session);
-
 	if (!acceptSession)
 	{
-		LOGE("accept session cast failed : the session is not an AcceptSession");
+		LOGE("PostAccept was given no accept session");
 
 		return false;
 	}
 
-	LOGT("accept session %u posting AcceptEx", session->GetSessionID());
+	LOGT("accept session %u posting AcceptEx", acceptSession->GetSessionID());
 
 	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
 	{
@@ -1224,8 +1328,14 @@ bool IOCPServer::PostAccept(ISession* session)
 		return false;
 	}
 
-	constexpr int maxImmediateRetryCount = 3;
-	for (int attempt = 0; attempt < maxImmediateRetryCount; ++attempt)
+	// 예전에는 여기서 3번까지 즉시 재시도하며 자원 부족일 때 ::Sleep(10) 을
+	// 했다. 이 함수는 IOCP 완료 핸들러 안에서 불리므로 그 대기가 워커
+	// 스레드를 통째로 막는다. 자원 부족은 보통 여러 슬롯에 동시에 오기
+	// 때문에 워커 여러 개가 같이 잠들 수 있다.
+	//
+	// 게다가 즉시 재시도는 의미가 없다. WSAENOBUFS 가 10ms 안에 풀릴
+	// 이유가 없기 때문이다. 그래서 한 번만 시도하고 실패하면 슬롯을 비운
+	// 채로 물러난다. 비워진 슬롯은 주기 점검(RefillAcceptSlots)이 채운다.
 	{
 		// 클라이언트와 연결될 소켓 생성
 		SOCKET clientSocket = ::WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
@@ -1236,7 +1346,7 @@ bool IOCPServer::PostAccept(ISession* session)
 			return false;
 		}
 
-		LOGT("accept session %u created socket %d", session->GetSessionID(), (int)clientSocket);
+		LOGT("accept session %u created socket %d", acceptSession->GetSessionID(), (int)clientSocket);
 
 		// 세션에 클라이언트 소켓을 등록
 		acceptSession->SetClientSocket(clientSocket);
@@ -1246,6 +1356,13 @@ bool IOCPServer::PostAccept(ISession* session)
 
 		// Overlapped 구조체 초기화
 		OverlappedEx& overlappedEx = acceptSession->GetAcceptOverlapped();  // session이 미리 생성한 OverlappedEx 포인터 반환
+
+		// I/O 를 거는 쪽이 자기 OVERLAPPED 를 직접 준비한다. 이전 완료가
+		// 남긴 Internal / hEvent 를 그대로 재사용하지 않도록 지운다.
+		// 예전에는 호출부가 ResetSession 으로 이 일을 대신했는데, 그건
+		// 정리 경로용 함수라 정상 수락마다 "IO 가 남아 있다" 는 오류 로그를
+		// 찍었다. 그 시점 카운트 1 은 방금 완료된 AcceptEx 의 것이라 정상이다.
+		::ZeroMemory(&overlappedEx, sizeof(OverlappedEx));
 
 		overlappedEx.wsaBuffer.len = 0;
 		overlappedEx.wsaBuffer.buf = nullptr;
@@ -1286,27 +1403,98 @@ bool IOCPServer::PostAccept(ISession* session)
 				}
 				else if (nError == WSAENOBUFS || nError == WSAEMFILE)
 				{
-					LOGE("accept session %u AcceptEx hit a system resource shortage (error %d)", acceptSession->GetSessionID(), nError);
-					::Sleep(10);
+					// 워커를 재우지 않는다. 이 슬롯은 비운 채로 두고
+					// 주기 점검이 다시 채우게 맡긴다.
+					LOGE("accept session %u AcceptEx hit a system resource shortage (error %d). the slot is left empty for the periodic refill",
+						acceptSession->GetSessionID(), nError);
 				}
 				else if (nError == ERROR_OPERATION_ABORTED)
 				{
 					LOGW("accept session %u AcceptEx aborted", acceptSession->GetSessionID());
-					return false;
 				}
 				else
 				{
 					LOGE("accept session %u AcceptEx failed (error %d)", acceptSession->GetSessionID(), nError);
 				}
 
-				continue;
+				return false;
 			}
 		}
-
-		return true;
 	}
 
-	return false;
+	// 여기까지 왔으면 AcceptEx 가 걸렸다 (ERROR_IO_PENDING 또는 즉시 성공).
+	::InterlockedIncrement(&m_postedAcceptCount);
+
+	return true;
+}
+
+void IOCPServer::RefillAcceptSlots()
+{
+	if (!m_sessionManager)
+		return;
+
+	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
+		return;
+
+	const uint32_t slotCount = m_sessionManager->GetAcceptSessionCount();
+	uint32_t refilled = 0;
+
+	for (uint32_t i = 0; i < slotCount; ++i)
+	{
+		AcceptSession* acceptSession = m_sessionManager->GetAcceptSession(i);
+		if (!acceptSession)
+			continue;
+
+		// ACCEPT_READY 는 "아무 워커도 이 슬롯을 붙들고 있지 않다" 는 뜻이다.
+		// 걸기가 실패한 슬롯은 ResetSession 을 지나 이 상태로 남는다.
+		if (acceptSession->GetAcceptSessionState() != AcceptSessionState::ACCEPT_READY)
+			continue;
+
+		if (!PostAccept(acceptSession))
+		{
+			// 아직 자원이 부족하다. 다음 주기에 다시 시도한다.
+			break;
+		}
+
+		++refilled;
+	}
+
+	if (refilled > 0)
+	{
+		LOGI("refilled %u accept slot(s), now %u of %u posted",
+			refilled, GetPostedAcceptCount(), GetDesiredAcceptCount());
+
+		// 다시 채워졌으므로 다음 고갈 때 또 울릴 수 있도록 래치를 푼다.
+		::InterlockedExchange(&m_acceptStarvationReported, FALSE);
+	}
+}
+
+void IOCPServer::ReportAcceptStarvationIfNeeded()
+{
+	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
+		return;
+
+	if (::InterlockedCompareExchange(&m_postedAcceptCount, 0, 0) != 0)
+		return;
+
+	// 같은 고갈에 대해 한 번만 울린다. RefillAcceptSlots 가 성공하면 풀린다.
+	if (::InterlockedCompareExchange(&m_acceptStarvationReported, TRUE, FALSE) != FALSE)
+		return;
+
+	ENGINE_VIOLATION("no AcceptEx is posted. the server is running but will not take any new connection until a slot is refilled");
+}
+
+uint32_t IOCPServer::GetPostedAcceptCount() const
+{
+	const LONG count = ::InterlockedCompareExchange(
+		const_cast<volatile LONG*>(&m_postedAcceptCount), 0, 0);
+
+	return count < 0 ? 0 : static_cast<uint32_t>(count);
+}
+
+uint32_t IOCPServer::GetDesiredAcceptCount() const
+{
+	return m_desiredAcceptCount;
 }
 
 ReadySessionQueue* IOCPServer::GetReadySessionQueue() const
@@ -1371,11 +1559,11 @@ bool IOCPServer::SendSystemAuthResponse(ClientSession* session, SYSTEM_AUTH_RESU
 	return true;
 }
 
-bool IOCPServer::HandleSystemPacket(ClientSession* session, uint16_t packetId, const char* packetData, uint32_t packetSize)
+IOCPServer::SystemPacketResult IOCPServer::HandleSystemPacket(ClientSession* session, uint16_t packetId, const char* packetData, uint32_t packetSize)
 {
 	if (!session || !packetData)
 	{
-		return false;
+		return SystemPacketResult::Failed;
 	}
 
 	switch (static_cast<PACKET_ID>(packetId))
@@ -1384,51 +1572,73 @@ bool IOCPServer::HandleSystemPacket(ClientSession* session, uint16_t packetId, c
 	{
 		if (packetSize != sizeof(CS_SYSTEM_AUTH_REQUEST_PACKET))
 		{
-			return false;
+			return SystemPacketResult::Failed;
 		}
 
 		const CS_SYSTEM_AUTH_REQUEST_PACKET* request = reinterpret_cast<const CS_SYSTEM_AUTH_REQUEST_PACKET*>(packetData);
 		if (session->GetServerSessionState() != ServerSessionState::CONNECTED &&
 			session->GetServerSessionState() != ServerSessionState::AUTH_PENDING)
 		{
-			return SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::INVALID_STATE);
+			SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::INVALID_STATE);
+			return SystemPacketResult::Rejected;
 		}
 
 		if (request->protocolVersion != IOCP_ENGINE_PROTOCOL_VERSION)
 		{
-			return SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::PROTOCOL_MISMATCH);
+			SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::PROTOCOL_MISMATCH);
+			return SystemPacketResult::Rejected;
+		}
+
+		// 서비스가 붙잡아 둘 상한을 넘었는지 여기서 본다.
+		//
+		// accept 단계가 아니라 인증 단계에서 거절하는 이유는, 그 시점에는
+		// 소켓이 아직 세션에 붙지 않아 응답을 보낼 수단이 없기 때문이다.
+		// 여기까지 오면 정상 세션이므로 기존 인증 응답 경로를 그대로 쓴다.
+		if (m_connectionPolicy.serviceCapacity > 0)
+		{
+			const uint32_t inUse = m_sessionManager->GetClientSessionInUseCount();
+
+			if (inUse > m_connectionPolicy.serviceCapacity)
+			{
+				LOGW("session %u rejected : service capacity reached (%u in use, limit %u)",
+					session->GetSessionID(), inUse, m_connectionPolicy.serviceCapacity);
+
+				SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::SERVER_FULL);
+
+				return SystemPacketResult::Rejected;
+			}
 		}
 
 		session->SetServerSessionState(ServerSessionState::AUTH_PENDING);
 
 		if (!SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::SUCCESS))
 		{
-			return false;
+			return SystemPacketResult::Failed;
 		}
 
 		session->SetServerSessionState(ServerSessionState::ESTABLISHED);
 		LOGI("session %u session established", session->GetSessionID());
-		return true;
+		return SystemPacketResult::Ok;
 	}
 
 	case PACKET_ID::CS_SYSTEM_HEARTBEAT_RESPONSE:
 	{
 		if (packetSize != sizeof(CS_SYSTEM_HEARTBEAT_RESPONSE_PACKET))
 		{
-			return false;
+			return SystemPacketResult::Failed;
 		}
 
 		if (!session->IsEstablished())
 		{
-			return false;
+			return SystemPacketResult::Failed;
 		}
 
 		session->UpdateLastHeartbeatTick();
-		return true;
+		return SystemPacketResult::Ok;
 	}
 
 	default:
 		LOGW("session %u unhandled system packet id: %u", session->GetSessionID(), packetId);
-		return false;
+		return SystemPacketResult::Failed;
 	}
 }

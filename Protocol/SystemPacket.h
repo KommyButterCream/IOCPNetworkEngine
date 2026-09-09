@@ -13,6 +13,11 @@ enum class SYSTEM_AUTH_RESULT : uint16_t
 	FAILED = 1,
 	INVALID_STATE = 2,
 	PROTOCOL_MISMATCH = 3,
+
+	// 서비스가 붙잡아 둘 접속 수 상한을 넘었다.
+	// 세션 풀이 아예 비면 소켓을 즉시 닫을 수밖에 없어 클라는 RST 만 본다.
+	// 이 값은 그보다 앞선 여유 구간에서 이유를 알려주기 위한 것이다.
+	SERVER_FULL = 4,
 };
 
 #pragma pack(push, 1)

@@ -563,7 +563,7 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 		// 그대로 방치하지 않고 연결을 정리한다.
 		if (!clientSession->PostReceive())
 		{
-			LOGE("session %u failed to re-arm recv, disconnecting instead of going silent",
+			LOGE("session %u failed to post the next recv, disconnecting instead of going silent",
 				clientSession->GetSessionID());
 			disconnectAfterHandling = true;
 		}

@@ -130,6 +130,10 @@ public:
 	void ClearCurrentJobData();
 
 	void SetRemoteAddress(const char* ipAddress, uint16_t port);
+
+	// 접속 폭주 방어에서 같은 주소의 접속 수를 셀 때 쓴다.
+	// 세션이 비어 있으면 빈 문자열이다.
+	const char* GetClientIPAddress() const { return m_clientIPAddress; }
 	void ClearRemoteAddress();
 	void UpdateLastRecvTick();
 	void UpdateLastHeartbeatTick();
