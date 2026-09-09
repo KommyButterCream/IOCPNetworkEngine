@@ -1,4 +1,4 @@
-#include "GlobalBlockPool.h"
+﻿#include "GlobalBlockPool.h"
 
 #include <string.h>
 
