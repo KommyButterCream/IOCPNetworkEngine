@@ -31,6 +31,7 @@
 #include "../Session/SessionManager.h"
 #include "../Session/ClientSession.h"
 #include "../Session/AcceptSession.h"
+#include "../Session/SessionJobQueue.h"
 
 #include "../../Core/Util/Logger.h"
 
@@ -1605,6 +1606,105 @@ EngineMemoryPool* IOCPServer::GetGeneralMemoryPool() const
 const HandlerContext& IOCPServer::GetHandlerContext() const
 {
 	return m_handlerContext;
+}
+
+bool IOCPServer::SubmitPacketJob(ISession* session, uint16_t packetId, const char* packetData, uint32_t packetSize)
+{
+	// recv 완료 키에 등록되는 것은 ClientSession 뿐이므로 이 경로의 세션은
+	// 항상 ClientSession 이다.
+	ClientSession* clientSession = static_cast<ClientSession*>(session);
+
+	// 어떤 이유로 거부하든 패킷은 여기서 회수한다. 아래 모든 실패 경로가
+	// 이 람다를 지난다 — 하나라도 빠지면 그게 곧 누수다.
+	auto dropPacket = [this, packetData]()
+		{
+			if (packetData && m_packetMemoryPool && m_generalMemoryPool)
+			{
+				MEMORY_POOL::ReleasePacket(*m_packetMemoryPool, *m_generalMemoryPool, packetData);
+			}
+		};
+
+	if (!clientSession || !packetData)
+	{
+		ENGINE_VIOLATION("SubmitPacketJob called with session %p packet %p",
+			static_cast<const void*>(session), static_cast<const void*>(packetData));
+		dropPacket();
+		return false;
+	}
+
+	if (!m_packetHandlerTable || !m_jobMemoryPool || !m_readySessionQueue)
+	{
+		ENGINE_VIOLATION("session %u cannot submit a job : the server is not fully initialized",
+			clientSession->GetSessionID());
+		dropPacket();
+		return false;
+	}
+
+	PacketHandlerFunc handler = m_packetHandlerTable->GetHandler(packetId);
+	if (!handler)
+	{
+		LOGW("session %u received packet id %u with no registered handler, dropping it",
+			clientSession->GetSessionID(), packetId);
+		dropPacket();
+		return false;
+	}
+
+	Job* job = MEMORY_POOL::CreateJob(*m_jobMemoryPool);
+	if (!job)
+	{
+		LOGE("session %u could not allocate a job, dropping packet id %u",
+			clientSession->GetSessionID(), packetId);
+		dropPacket();
+		return false;
+	}
+
+	job->SetPacketJob(JobType::PACKET, handler, session, packetId, packetData, packetSize, m_handlerContext);
+
+	// wasEmpty 는 받지만 스케줄 판단에 쓰지 않는다. 이유는 아래에.
+	bool wasEmpty = false;
+	if (!clientSession->GetJobQueue().EnqueueJob(job, wasEmpty))
+	{
+		LOGE("session %u failed to enqueue a job for packet id %u",
+			clientSession->GetSessionID(), packetId);
+
+		dropPacket();
+		MEMORY_POOL::ReleaseJob(*m_jobMemoryPool, job);
+		return false;
+	}
+
+	// 여기부터 packetData 와 job 의 소유권은 큐에 있다.
+
+	// 스케줄 조건에서 wasEmpty 를 뺐다.
+	//
+	// 예전 규약은 "큐가 비어 있었을 때만 스케줄한다" 였다. 대개는 맞지만
+	// 복구 불가 상태를 하나 만든다 — ReadySessionQueue::Push 가 실패하면
+	// 큐에는 Job 이 남고 스케줄은 되지 않은 상태가 된다. 그 뒤에 오는
+	// 패킷은 wasEmpty == false 를 보고 스케줄을 건너뛰므로, 그 세션은
+	// 영구히 스케줄되지 않는다.
+	//
+	// 중복 Push 를 실제로 막는 것은 아래 CAS 다. wasEmpty 는 그 CAS 를
+	// 아끼는 최적화였을 뿐이고, 그 최적화가 위 상태를 복구 불가로 만든다.
+	// CAS 만 남기면 패킷마다 다시 시도하므로 일시적 Push 실패가 스스로
+	// 복구된다. 값은 원자 연산 하나(패킷당 수십 cycle)이고, 실측된 잡당
+	// 비용(약 32us)에 비하면 무시할 수준이다.
+	if (!clientSession->IsProcessingReady())
+	{
+		// 이미 스케줄되어 있거나 워커가 처리 중이다. 그 워커가 드레인을
+		// 끝낸 뒤 큐가 비어 있지 않으면 스스로 다시 올린다.
+		return true;
+	}
+
+	if (!m_readySessionQueue->Push(clientSession))
+	{
+		// 반드시 되돌린다. 그러지 않으면 이 세션은 처리 중으로 표시된 채
+		// 아무도 처리하지 않는 상태가 된다.
+		clientSession->UpdateProcessingFlag(0);
+
+		LOGE("session %u could not be scheduled : the ready queue is full. the job stays queued",
+			clientSession->GetSessionID());
+	}
+
+	return true;
 }
 
 void* IOCPServer::GetServiceContext()

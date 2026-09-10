@@ -28,6 +28,17 @@ class SessionContext;
 
 #define INET_ADDRSTRLEN  22
 
+// ISessionEvent 를 직접 상속하는 이유. (서버는 그렇지 않다)
+//
+// 세션의 종료 요청(OnDisconnectRequest)을 받는 주체가 서버와 클라이언트에서
+// 다르다. 서버는 그 신호로 세션을 풀에 반납해야 하므로 풀을 가진
+// SessionManager 가 받는다. 클라이언트는 세션이 m_session 하나뿐이고 반납할
+// 풀이 없으니 자기가 직접 받는다.
+//
+// 그래서 IOCPServer 는 IOCPCore 만 상속하고, 이쪽만 다중 상속이다. 같은
+// 이벤트가 두 가지로 배선된 것처럼 보이지만 받아서 할 일이 다르다.
+// (어댑터 멤버를 끼워 단일 상속으로 맞출 수도 있으나, 클래스와 간접 호출을
+//  하나씩 늘려 가독성 흠 하나를 바꾸는 거래라 하지 않는다)
 class IOCP_ENGINE_API IOCPClient : public IOCPCore, public ISessionEvent
 {
 public:
@@ -125,6 +136,15 @@ public:
 
 
 protected:
+	// 받은 패킷을 세션의 Job 큐에 올린다. OnReceive 에서 부르는 것이 정상
+	// 사용이다. 계약은 IOCPServer::SubmitPacketJob 과 같다 —
+	// packetData 의 소유권은 성공/실패와 무관하게 이 함수가 가져간다.
+	//
+	// 클라이언트는 세션이 하나이고 소비자도 하나(ClientSessionScheduler)라
+	// ReadySessionQueue 도 처리 중 플래그도 쓰지 않는다. 큐에 넣는 것으로
+	// 끝이고, 잠들어 있는 소비자를 깨우는 일은 EnqueueJob 이 한다.
+	bool SubmitPacketJob(ISession* session, uint16_t packetId, const char* packetData, uint32_t packetSize);
+
 	virtual void OnClientConnect(ISession* session) {};
 	virtual void OnSessionEstablished(ISession* session) {};
 	virtual void OnClientDisconnect(ISession* session) {};

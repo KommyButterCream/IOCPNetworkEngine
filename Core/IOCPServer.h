@@ -181,6 +181,28 @@ protected:
 	virtual void* GetServiceContext();
 
 protected:
+	// 받은 패킷을 그 세션의 Job 큐에 올리고 필요하면 세션을 스케줄한다.
+	// OnReceive 에서 부르는 것이 정상 사용이다.
+	//
+	// 예전에는 이 다섯 단계를 서비스가 직접 했다.
+	//   CreateJob -> EnqueueJob(job, wasEmpty) -> wasEmpty 검사
+	//   -> IsProcessingReady() -> Push() -> 실패 시 UpdateProcessingFlag(0) 복구
+	//
+	// 어느 하나를 빠뜨리면 그 세션이 조용히 영구 정지한다. 규약은 엔진 밖에
+	// 있었지만 강제할 수 있는 곳은 엔진뿐이다.
+	//
+	// packetData 의 소유권은 성공/실패와 무관하게 이 함수가 가져간다.
+	//   받아들여지면 Job 이 들고 있다가 스케줄러가 Execute 뒤에 해제한다.
+	//   거부되면 여기서 해제한다.
+	// 그래서 부르는 쪽은 해제를 신경 쓸 필요가 없다.
+	//
+	// 반환값은 "패킷이 큐에 올랐는가" 다. 큐에 올린 뒤 스케줄에만 실패한
+	// 경우는 true 다 (다음 패킷이 그 세션을 되살린다. 아래 구현 주석 참고).
+	// 일부 패킷만 잡으로 넘기고 나머지를 그 자리에서 처리하려면 이 함수를
+	// 부르지 않으면 되고, 그때는 packetData 해제가 부르는 쪽 몫이다.
+	bool SubmitPacketJob(ISession* session, uint16_t packetId, const char* packetData, uint32_t packetSize);
+
+protected:
 	virtual void OnClientConnect(ISession* session) = 0;
 	virtual void OnClientDisconnect(ISession* session) = 0;
 	virtual void OnReceive(ISession* session, uint16_t packetId, const char* packetData, uint32_t packetSize) = 0;

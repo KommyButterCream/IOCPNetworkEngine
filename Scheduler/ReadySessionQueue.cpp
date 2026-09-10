@@ -26,6 +26,8 @@ bool ReadySessionQueue::Initialize(const uint32_t maxSessionCount)
 		return false;
 	}
 
+	::AcquireSRWLockExclusive(&m_srwLock);
+
 	m_capacity = maxSessionCount;
 	m_head = 0;
 	m_tail = 0;
@@ -33,6 +35,8 @@ bool ReadySessionQueue::Initialize(const uint32_t maxSessionCount)
 	m_stopFlag = false;
 
 	memset(m_queue, 0, sizeof(ISession*) * maxSessionCount);
+
+	::ReleaseSRWLockExclusive(&m_srwLock);
 
 	return true;
 }

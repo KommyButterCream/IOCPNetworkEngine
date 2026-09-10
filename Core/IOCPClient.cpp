@@ -921,6 +921,54 @@ const HandlerContext& IOCPClient::GetHandlerContext() const
 	return m_handlerContext;
 }
 
+bool IOCPClient::SubmitPacketJob(ISession* session, uint16_t packetId, const char* packetData, uint32_t packetSize)
+{
+	ClientSession* clientSession = ResolveOwnSession(session, "SubmitPacketJob");
+
+	auto dropPacket = [this, packetData]()
+		{
+			if (packetData && m_packetMemoryPool && m_generalMemoryPool)
+			{
+				MEMORY_POOL::ReleasePacket(*m_packetMemoryPool, *m_generalMemoryPool, packetData);
+			}
+		};
+
+	if (!clientSession || !packetData)
+	{
+		dropPacket();
+		return false;
+	}
+
+	if (!m_packetHandlerTable || !m_jobMemoryPool)
+	{
+		ENGINE_VIOLATION("cannot submit a job : the client is not fully initialized");
+		dropPacket();
+		return false;
+	}
+
+	PacketHandlerFunc handler = m_packetHandlerTable->GetHandler(packetId);
+	if (!handler)
+	{
+		LOGW("received packet id %u with no registered handler, dropping it", packetId);
+		dropPacket();
+		return false;
+	}
+
+	Job* job = MEMORY_POOL::CreateJob(*m_jobMemoryPool);
+	if (!job)
+	{
+		LOGE("could not allocate a job, dropping packet id %u", packetId);
+		dropPacket();
+		return false;
+	}
+
+	job->SetPacketJob(JobType::PACKET, handler, session, packetId, packetData, packetSize, m_handlerContext);
+
+	// SubmitJob 이 실패 시 패킷과 Job 을 함께 회수한다.
+	// (선언만 되어 있고 아무도 부르지 않던 함수다. 원래 이 자리였다)
+	return clientSession->SubmitJob(job);
+}
+
 ClientSession* IOCPClient::GetClientSession() const
 {
 	return m_session;
