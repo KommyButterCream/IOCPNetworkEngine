@@ -233,8 +233,5 @@
     <ClInclude Include="..\Session\SessionNode.h">
       <Filter>Session</Filter>
     </ClInclude>
-    <ClInclude Include="..\Session\ISessionContext.h">
-      <Filter>Session</Filter>
-    </ClInclude>
   </ItemGroup>
 </Project>

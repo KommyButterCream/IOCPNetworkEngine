@@ -114,61 +114,6 @@ void BaseSession::Finalize()
 	m_destroyFlag = true;
 }
 
-void BaseSession::SetClientSocket(SOCKET socket)
-{
-	m_clientSocket = socket;
-}
-
-SOCKET BaseSession::GetClientSocket() const
-{
-	return m_clientSocket;
-}
-
-void BaseSession::SetClientSessionState(ClientSessionState sessionState)
-{
-	m_clientSessionState = sessionState;
-}
-
-ClientSessionState BaseSession::GetClientSessionState() const
-{
-	return m_clientSessionState;
-}
-
-void BaseSession::SetServerSessionState(ServerSessionState sessionState)
-{
-	m_serverSessionState = sessionState;
-}
-
-ServerSessionState BaseSession::GetServerSessionState() const
-{
-	return m_serverSessionState;
-}
-
-void BaseSession::SetAcceptSessionState(AcceptSessionState sessionState)
-{
-	m_acceptSessionState = sessionState;
-}
-
-AcceptSessionState BaseSession::GetAcceptSessionState() const
-{
-	return m_acceptSessionState;
-}
-
-SESSION_ROLE BaseSession::GetSessionRole() const
-{
-	return m_sessionRole;
-}
-
-uint32_t BaseSession::GetSessionID() const
-{
-	return m_sessionId;
-}
-
-void BaseSession::SetSessionID(uint32_t sessionId)
-{
-	m_sessionId = sessionId;
-}
-
 void BaseSession::IncrementIO()
 {
 	::InterlockedIncrement(&m_ioCount);
@@ -335,9 +280,4 @@ SOCKET BaseSession::DetachSocket()
 	SOCKET socket = m_clientSocket;
 	m_clientSocket = INVALID_SOCKET;
 	return socket;
-}
-
-bool BaseSession::IsSocketInvalid() const
-{
-	return (m_clientSocket == INVALID_SOCKET);
 }
