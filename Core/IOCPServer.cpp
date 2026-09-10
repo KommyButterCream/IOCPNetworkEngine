@@ -568,6 +568,9 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 		acceptSession->DecrementIO();
 		acceptSession->ResetSession();
 
+		// 종료 중이라 다시 걸지 않는다. 슬롯을 놓고 나간다.
+		acceptSession->ReleaseSlot();
+
 		return;
 	}
 
@@ -627,6 +630,12 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 			const bool nextAcceptPosted = PostAccept(acceptSession);
 
+			if (!nextAcceptPosted)
+			{
+				// 슬롯이 실제로 비었다. 놓아야 주기 점검이 다시 채울 수 있다.
+				acceptSession->ReleaseSlot();
+			}
+
 			acceptSession->DecrementIO();
 
 			// 걸려 있는 AcceptEx 가 하나도 없으면 새 접속을 못 받는 상태다.
@@ -672,6 +681,12 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 			acceptSession->ResetSession();
 
 			const bool nextAcceptPosted = PostAccept(acceptSession);
+
+			if (!nextAcceptPosted)
+			{
+				// 슬롯이 실제로 비었다. 놓아야 주기 점검이 다시 채울 수 있다.
+				acceptSession->ReleaseSlot();
+			}
 
 			// 완료된 AcceptEx 1건에 대한 우리 몫의 카운트를 내린다.
 			// 다음 accept 를 건 뒤에 내리는 이유는 recv/send 와 같다 — 먼저 내리면
@@ -722,6 +737,12 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 			const bool nextAcceptPosted = PostAccept(acceptSession);
 
+			if (!nextAcceptPosted)
+			{
+				// 슬롯이 실제로 비었다. 놓아야 주기 점검이 다시 채울 수 있다.
+				acceptSession->ReleaseSlot();
+			}
+
 			// 완료된 AcceptEx 1건에 대한 우리 몫의 카운트를 내린다.
 			// 이게 빠져 있어서 수락 1건마다 카운트가 +1 로 새고, 종료 시
 			// WaitForIOCancelComplete 가 0 을 못 봐서 10초씩 태웠다.
@@ -755,6 +776,12 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 		acceptSession->ResetSession();
 
 		const bool nextAcceptPosted = PostAccept(acceptSession);
+
+		if (!nextAcceptPosted)
+		{
+			// 슬롯이 실제로 비었다. 놓아야 주기 점검이 다시 채울 수 있다.
+			acceptSession->ReleaseSlot();
+		}
 
 		// 완료된 AcceptEx 1건에 대한 우리 몫의 카운트를 내린다.
 		acceptSession->DecrementIO();
@@ -842,6 +869,11 @@ void IOCPServer::HandleAcceptIOCancelled(uint32_t sessionId)
 	// 취소된 AcceptEx 는 더 이상 걸려 있지 않다.
 	::InterlockedDecrement(&m_postedAcceptCount);
 	acceptSession->DecrementIO();
+
+	// 이 경로는 다시 걸지 않는다. 슬롯이 비었으므로 소유권을 놓는다.
+	// 종료 중이면 주기 점검이 어차피 걸지 않고, 종료가 아닌 accept 실패라면
+	// 이 슬롯은 주기 점검이 되살려야 한다.
+	acceptSession->ReleaseSlot();
 }
 
 void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
@@ -1282,8 +1314,17 @@ bool IOCPServer::PrepareAccept()
 			return false;
 		}
 
+		// 기동 시점이라 경쟁자는 없지만, 슬롯 소유권을 얻고 거는 규칙은
+		// 발행부 전체에 예외 없이 적용한다.
+		if (!session->TryAcquireSlot())
+		{
+			ENGINE_VIOLATION("accept session %u is already owned before the first post", i);
+			return false;
+		}
+
 		if (!PostAccept(session))
 		{
+			session->ReleaseSlot();
 			LOGE("PostAccept failed for the accept session");
 			ENGINE_BREAK_IF_DEBUGGER();
 			return false;
@@ -1320,8 +1361,16 @@ bool IOCPServer::PrepareAccept(uint32_t sessionId)
 		return false;
 	}
 
+	if (!session->TryAcquireSlot())
+	{
+		// 다른 쪽이 이미 이 슬롯을 쓰고 있다.
+		LOGW("accept session %u is already owned, skipping the post", sessionId);
+		return false;
+	}
+
 	if (!PostAccept(session))
 	{
+		session->ReleaseSlot();
 		LOGE("PostAccept failed for the accept session");
 
 		return false;
@@ -1471,14 +1520,19 @@ void IOCPServer::RefillAcceptSlots()
 		if (!acceptSession)
 			continue;
 
-		// ACCEPT_READY 는 "아무 워커도 이 슬롯을 붙들고 있지 않다" 는 뜻이다.
-		// 걸기가 실패한 슬롯은 ResetSession 을 지나 이 상태로 남는다.
-		if (acceptSession->GetAcceptSessionState() != AcceptSessionState::ACCEPT_READY)
+		// 예전에는 GetAcceptSessionState() == ACCEPT_READY 로 판단했다.
+		// 그 상태는 원자적이지 않고, 워커가 ResetSession 과 PostAccept 사이에
+		// 있을 때도 ACCEPT_READY 로 보인다. 그래서 둘이 함께 걸었다.
+		//
+		// 이제 근거는 이 CAS 하나다. 지면 다른 쪽이 그 슬롯을 쓰고 있다는
+		// 뜻이므로 조용히 넘어간다 - 오류가 아니라 정상이다.
+		if (!acceptSession->TryAcquireSlot())
 			continue;
 
 		if (!PostAccept(acceptSession))
 		{
-			// 아직 자원이 부족하다. 다음 주기에 다시 시도한다.
+			// 아직 자원이 부족하다. 슬롯을 놓고 다음 주기에 다시 시도한다.
+			acceptSession->ReleaseSlot();
 			break;
 		}
 

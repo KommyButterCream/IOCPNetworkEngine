@@ -88,11 +88,22 @@ bool SessionJobQueue::DequeueJob(Job*& outJob)
 
 void SessionJobQueue::WakeUp()
 {
-	if (m_sessionRole == SESSION_ROLE::CLIENT)
-	{
-		m_stopFlag = true;
-		::WakeConditionVariable(&m_cv);
-	}
+	if (m_sessionRole != SESSION_ROLE::CLIENT)
+		return;
+
+	// 플래그는 락 안에서 세운다.
+	//
+	// 읽는 쪽(WaitDequeueJob)이 락 안이라 밖에서 쓰면 형식상 데이터 경합이고,
+	// 평범한 bool 이라 원자성도 없다. 더 중요한 건 대기자의 술어 검사와
+	// 이 쓰기가 겹치지 않게 만드는 것이다 — 그게 없으면 "플래그를 봤는데
+	// 아직 false" 인 상태로 잠드는 창이 남는다.
+	::AcquireSRWLockExclusive(&m_srwLock);
+	m_stopFlag = true;
+	::ReleaseSRWLockExclusive(&m_srwLock);
+
+	// 신호는 락을 놓은 뒤에 보낸다. 락 안에서 보내면 깨어난 스레드가
+	// 곧바로 그 락에서 다시 막힌다.
+	::WakeConditionVariable(&m_cv);
 }
 
 bool SessionJobQueue::WaitDequeueJob(Job*& outJob)
@@ -107,13 +118,13 @@ bool SessionJobQueue::WaitDequeueJob(Job*& outJob)
 
 	while (m_head == nullptr)
 	{
-		::SleepConditionVariableSRW(&m_cv, &m_srwLock, INFINITE, 0);
-
 		if (m_stopFlag)
 		{
 			::ReleaseSRWLockExclusive(&m_srwLock);
 			return false;
 		}
+
+		::SleepConditionVariableSRW(&m_cv, &m_srwLock, INFINITE, 0);
 	}
 
 	outJob = m_head;

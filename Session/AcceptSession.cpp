@@ -25,6 +25,8 @@ bool AcceptSession::Initialize(SESSION_ROLE sessionType, uint32_t sessionId)
 	if (!BaseSession::Initialize(sessionType, sessionId))
 		return false;
 
+	::InterlockedExchange(&m_slotOwned, 0);
+
 	SetAcceptSessionState(AcceptSessionState::ACCEPT_READY);
 	return true;
 }
@@ -33,6 +35,12 @@ void AcceptSession::ResetSession()
 {
 	BaseSession::ResetSession();
 	SetAcceptSessionState(AcceptSessionState::ACCEPT_READY);
+
+	// m_slotOwned 는 일부러 건드리지 않는다.
+	//
+	// 이 함수는 다시 걸기 직전에도 불린다. 여기서 소유권을 놓으면 바로
+	// 그 순간 주기 점검이 같은 슬롯을 가져가 함께 걸 수 있다. 그게 이
+	// 플래그를 만든 이유다. 세션 상태와 슬롯 소유권은 수명이 다르다.
 
 	::ZeroMemory(&m_acceptBuffer, sizeof(m_acceptBuffer));
 
@@ -47,6 +55,8 @@ void AcceptSession::Finalize()
 	}
 
 	BaseSession::Finalize();
+
+	::InterlockedExchange(&m_slotOwned, 0);
 
 	::ZeroMemory(&m_acceptBuffer, sizeof(m_acceptBuffer));
 
@@ -103,6 +113,21 @@ bool AcceptSession::OnDisconnect()
 	}
 
 	return true;
+}
+
+bool AcceptSession::TryAcquireSlot()
+{
+	return ::InterlockedCompareExchange(&m_slotOwned, 1, 0) == 0;
+}
+
+void AcceptSession::ReleaseSlot()
+{
+	if (::InterlockedExchange(&m_slotOwned, 0) == 0)
+	{
+		// 갖고 있지 않은 슬롯을 놓았다. 소유권 인계가 어긋났다는 뜻이라
+		// 조용히 넘기면 다음에 둘이 함께 거는 상태로 이어진다.
+		ENGINE_VIOLATION("accept session %u released a slot it did not own", GetSessionID());
+	}
 }
 
 OverlappedEx& AcceptSession::GetAcceptOverlapped()

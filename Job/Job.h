@@ -22,7 +22,7 @@ __declspec(align(64)) struct Job
 		SystemHandlerFunc systemFunc;
 	};
 
-	HandlerContext context = {};
+	const HandlerContext* context = nullptr;
 
 	uint32_t size = 0;
 	uint16_t packetId = 0;
@@ -36,17 +36,26 @@ __declspec(align(64)) struct Job
 		this->packetId = packetId;
 		this->data = packetData;
 		this->size = packetSize;
-		this->context = context;
+		this->context = &context;
 	}
 
 	void Execute()
 	{
+		// context 는 SetPacketJob 등이 채운다. 비어 있으면 Job 이 설정되지
+		// 않은 채로 큐에 들어갔다는 뜻이라, 역참조하지 않고 걸러낸다.
+		if (!context)
+		{
+			LOGE("job (type %d, packet id %u) has no handler context, skipping",
+				static_cast<int>(jobType), packetId);
+			return;
+		}
+
 		switch (jobType)
 		{
 		case JobType::PACKET:
 			if (packetFunc)
 			{
-				bool result = packetFunc(reinterpret_cast<ISession*>(target), data, size, context);
+				bool result = packetFunc(reinterpret_cast<ISession*>(target), data, size, *context);
 				if (!result)
 				{
 					// 핸들러가 false 를 반환한 것은 정상적인 실패 표현이다.
@@ -58,13 +67,13 @@ __declspec(align(64)) struct Job
 		case JobType::DB:
 			if (dbFunc)
 			{
-				dbFunc(reinterpret_cast<IDBConnection*>(target), data, size, context);
+				dbFunc(reinterpret_cast<IDBConnection*>(target), data, size, *context);
 			}
 			break;
 		case JobType::SYSTEM:
 			if (systemFunc)
 			{
-				systemFunc(reinterpret_cast<IOCPCore*>(target), data, size, context);
+				systemFunc(reinterpret_cast<IOCPCore*>(target), data, size, *context);
 			}
 			break;
 		}

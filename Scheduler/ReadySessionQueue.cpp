@@ -78,18 +78,15 @@ ISession* ReadySessionQueue::Pop(const uint32_t timeout_ms)
 
 	while (m_count == 0)
 	{
-		BOOL ok = ::SleepConditionVariableSRW(&m_cv, &m_srwLock, timeout_ms, 0);
-
-		if (!ok)
+		if (m_stopFlag)
 		{
-			if (::GetLastError() == ERROR_TIMEOUT)
-			{
-				::ReleaseSRWLockExclusive(&m_srwLock);
-				return nullptr;
-			}
+			::ReleaseSRWLockExclusive(&m_srwLock);
+			return nullptr;
 		}
 
-		if (m_stopFlag)
+		const BOOL ok = ::SleepConditionVariableSRW(&m_cv, &m_srwLock, timeout_ms, 0);
+
+		if (!ok && ::GetLastError() == ERROR_TIMEOUT)
 		{
 			::ReleaseSRWLockExclusive(&m_srwLock);
 			return nullptr;
@@ -108,7 +105,11 @@ ISession* ReadySessionQueue::Pop(const uint32_t timeout_ms)
 
 void ReadySessionQueue::WakeAll()
 {
+	// 플래그는 락 안에서. (이유는 SessionJobQueue::WakeUp 주석과 같다)
+	::AcquireSRWLockExclusive(&m_srwLock);
 	m_stopFlag = true;
+	::ReleaseSRWLockExclusive(&m_srwLock);
+
 	::WakeAllConditionVariable(&m_cv);
 }
 
