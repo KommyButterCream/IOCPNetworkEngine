@@ -12,8 +12,6 @@ using namespace Core::Util;
 
 AcceptSession::AcceptSession()
 {
-	::ZeroMemory(&m_acceptBuffer, sizeof(m_acceptBuffer));
-	::ZeroMemory(&m_acceptOverlapped, sizeof(OverlappedEx));
 	m_acceptOverlapped.operation = IO_OPERATION::ACCEPT;
 }
 
@@ -37,8 +35,8 @@ void AcceptSession::ResetSession()
 	SetAcceptSessionState(AcceptSessionState::ACCEPT_READY);
 
 	::ZeroMemory(&m_acceptBuffer, sizeof(m_acceptBuffer));
-	::ZeroMemory(&m_acceptOverlapped, sizeof(OverlappedEx));
-	m_acceptOverlapped.operation = IO_OPERATION::ACCEPT;
+
+	m_acceptOverlapped.Clear();
 }
 
 void AcceptSession::Finalize()
@@ -51,8 +49,8 @@ void AcceptSession::Finalize()
 	BaseSession::Finalize();
 
 	::ZeroMemory(&m_acceptBuffer, sizeof(m_acceptBuffer));
-	::ZeroMemory(&m_acceptOverlapped, sizeof(OverlappedEx));
-	m_acceptOverlapped.operation = IO_OPERATION::ACCEPT;
+
+	m_acceptOverlapped.Clear();
 
 	m_destroyFlag = true;
 }
@@ -70,6 +68,15 @@ bool AcceptSession::OnAccept()
 
 bool AcceptSession::OnConnect()
 {
+	// accept 세션은 접속을 거는 쪽이 아니다. OnConnect 를 부르는 곳은
+	// ConnectEx 완료 처리(IOCPClient)와 accept 완료 처리(IOCPServer)뿐이고
+	// 둘 다 ClientSession 을 상대한다. 여기 왔다면 라우팅이 깨진 것이다.
+	//
+	// 예전에는 조용히 false 만 돌려줬다. 호출부는 그걸 "접속 훅이 실패했다"
+	// 로 읽고 연결을 끊는데, 진짜 원인인 잘못된 라우팅은 아무 데도 남지 않는다.
+	ENGINE_VIOLATION("accept session %u OnConnect was called. accept sessions never connect",
+		GetSessionID());
+
 	return false;
 }
 

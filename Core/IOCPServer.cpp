@@ -137,7 +137,14 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 	if (!m_packetMemoryPool)
 		return false;
 
-	m_packetMemoryPool->Initialize(configsPacket, _countof(configsPacket));
+	// 바로 위 job 풀은 반환값을 검사하는데 여기 둘은 버리고 있었다.
+	// 실패하면 bin 이 하나도 없는 풀이 그대로 살아남아, 첫 패킷 할당에서야
+	// 정체 모를 실패로 드러난다. 기동 시점에 끊는 편이 낫다.
+	if (!m_packetMemoryPool->Initialize(configsPacket, _countof(configsPacket)))
+	{
+		LOGE("failed to initialize the packet memory pool");
+		return false;
+	}
 
 	EngineMemoryPool::SlabConfig configsImageBuffer[] = {
 		{MEMORY_SIZE_1MB, 1},
@@ -149,7 +156,11 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 	if (!m_generalMemoryPool)
 		return false;
 
-	m_generalMemoryPool->Initialize(configsImageBuffer, _countof(configsImageBuffer));
+	if (!m_generalMemoryPool->Initialize(configsImageBuffer, _countof(configsImageBuffer)))
+	{
+		LOGE("failed to initialize the general memory pool");
+		return false;
+	}
 
 	m_hybridSendPacketPool = new HybridSendPacketPool();
 	if (!m_hybridSendPacketPool)
@@ -162,7 +173,11 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		return false;
 
 	const uint32_t sessionQueueBufferCount = maxConnectionCount/* * 2*/;
-	m_readySessionQueue->Initialize(sessionQueueBufferCount);
+	if (!m_readySessionQueue->Initialize(sessionQueueBufferCount))
+	{
+		LOGE("failed to initialize the ready session queue");
+		return false;
+	}
 
 	m_handlerContext.jobMemoryPool = GetJobMemoryPool();
 	m_handlerContext.packetMemoryPool = GetPacketMemoryPool();
@@ -182,7 +197,11 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		sessionProcessorThreadCount = ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
 	if (sessionProcessorThreadCount == 0)
 		sessionProcessorThreadCount = 1;
-	m_readySessionScheduler->Initialize(sessionProcessorThreadCount, m_readySessionQueue, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool);
+	if (!m_readySessionScheduler->Initialize(sessionProcessorThreadCount, m_readySessionQueue, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool))
+	{
+		LOGE("failed to initialize the ready session scheduler");
+		return false;
+	}
 
 	m_sessionManager = new SessionManager;
 	if (!m_sessionManager)
@@ -211,9 +230,10 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 
 	constexpr uint64_t HeartbeatCheckInterval_ms = 5'000;
 	constexpr uint64_t HeartbeatTimeout_ms = 15'000;
-	// 주기 점검에 accept 슬롯 보충을 얹는다. 걸기가 실패해 비어 버린 슬롯은
-	// 스스로 복구되지 않으므로, 누군가 다시 걸어 주어야 한다.
-	// 이 스레드가 단일이라는 점이 그 작업의 안전 조건이다 (RefillAcceptSlots 주석 참고).
+	// 걸기가 실패해 비어 버린 accept 슬롯을 다시 post 하는 일을 이 스레드의
+	// 주기에 얹는다. 실패한 슬롯은 스스로 복구되지 않으므로 (다음 PostAccept 를
+	// 부를 완료 통지가 애초에 그 실패한 걸기의 것이다) 누군가 다시 걸어 주어야
+	// 한다. 자세한 이유는 AcceptRepostFunc 선언부 주석에 있다.
 	m_heartbeatThread = new HeartbeatThread(m_sessionManager, HeartbeatCheckInterval_ms, HeartbeatTimeout_ms,
 		[](void* context) { static_cast<IOCPServer*>(context)->RefillAcceptSlots(); }, this);
 	if (!m_heartbeatThread)
@@ -385,7 +405,11 @@ void IOCPServer::HandleCompletion(
 	case IO_OPERATION::RECV:
 	case IO_OPERATION::SEND:
 	{
-		ISession* session = reinterpret_cast<ISession*>(completionKey);
+		// 완료 키에 넣은 것이 ClientSession* 다 (HandleAccept 의
+		// RegisterSocketToIOCP 참고). 예전에는 ISession* 로 되받아서
+		// 계층을 가로지르는 reinterpret_cast 를 했고, 단일 상속이라
+		// 주소가 우연히 같아서 동작했을 뿐이다. 넣은 타입 그대로 받는다.
+		ClientSession* session = reinterpret_cast<ClientSession*>(completionKey);
 		ENGINE_CHECK_RETVOID(session != nullptr,
 			"io %d completion carried no session in the completion key",
 			static_cast<int>(overlappedEx->operation));
@@ -411,7 +435,7 @@ void IOCPServer::HandleCompletion(
 	}
 }
 
-void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ISession* session, int errorCode, IO_OPERATION ioOperation)
+void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* session, int errorCode, IO_OPERATION ioOperation)
 {
 	// 공용으로 처리 되어야 하는 예외 처리
 
@@ -622,8 +646,13 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 	if (!m_sessionManager->IsClientSessionFull())
 	{
 		// Client Session Pool 이 여유 있는 경우
-		ISession* clientSessionBase = m_sessionManager->AcquireClientSession();
-		clientSession = dynamic_cast<ClientSession*>(clientSessionBase);
+		//
+		// 예전에는 AcquireClientSession 이 ISession* 를 돌려주어 여기서
+		// dynamic_cast 로 되돌렸다. 풀에는 ClientSession 만 들어가므로
+		// 그 RTTI 조회는 절대 실패할 수 없는 검사였고, 실패를 "풀 고갈" 로
+		// 착각하게 만드는 분기까지 달고 있었다. 이제 임대가 구체 타입을
+		// 돌려주므로 아래 널 검사는 순수하게 고갈만 뜻한다.
+		clientSession = m_sessionManager->AcquireClientSession();
 
 		if (!clientSession)
 		{
@@ -815,7 +844,7 @@ void IOCPServer::HandleAcceptIOCancelled(uint32_t sessionId)
 	acceptSession->DecrementIO();
 }
 
-void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)
+void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
 {
 	if (!session)
 		return;
@@ -967,7 +996,7 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 	}
 }
 
-void IOCPServer::HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* session)
+void IOCPServer::HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* session)
 {
 	if (!session)
 		return;
@@ -980,7 +1009,7 @@ void IOCPServer::HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* sessi
 	LOGI("session %u recv cancelled", session->GetSessionID());
 }
 
-void IOCPServer::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)
+void IOCPServer::HandleSend(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
 {
 	if (!session)
 		return;
@@ -1014,7 +1043,7 @@ void IOCPServer::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD
 	clientSession->DecrementIO();
 }
 
-void IOCPServer::HandleSendCancelled(OverlappedEx* overlappedEx, ISession* session)
+void IOCPServer::HandleSendCancelled(OverlappedEx* overlappedEx, ClientSession* session)
 {
 	if (!session)
 		return;
@@ -1027,7 +1056,7 @@ void IOCPServer::HandleSendCancelled(OverlappedEx* overlappedEx, ISession* sessi
 	LOGI("session %u send cancelled", session->GetSessionID());
 }
 
-void IOCPServer::HandleSessionDisconnected(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)
+void IOCPServer::HandleSessionDisconnected(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
 {
 	// 세션의 정상 종료 시퀀스
 
@@ -1362,12 +1391,9 @@ bool IOCPServer::PostAccept(AcceptSession* acceptSession)
 		// 예전에는 호출부가 ResetSession 으로 이 일을 대신했는데, 그건
 		// 정리 경로용 함수라 정상 수락마다 "IO 가 남아 있다" 는 오류 로그를
 		// 찍었다. 그 시점 카운트 1 은 방금 완료된 AcceptEx 의 것이라 정상이다.
-		::ZeroMemory(&overlappedEx, sizeof(OverlappedEx));
-
-		overlappedEx.wsaBuffer.len = 0;
-		overlappedEx.wsaBuffer.buf = nullptr;
-		overlappedEx.operation = IO_OPERATION::ACCEPT;
-		overlappedEx.sessionId = acceptSession->GetSessionID();
+		//
+		// AcceptEx 는 주소 버퍼를 따로 받으므로 wsaBuffer 는 비워 둔다.
+		overlappedEx.ResetForNextIO(acceptSession->GetSessionID());
 
 		acceptSession->SetAcceptSessionState(AcceptSessionState::ACCEPT_WAIT);
 

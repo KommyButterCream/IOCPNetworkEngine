@@ -40,10 +40,13 @@ public:
 	bool IsReady() const { return m_ready; }
 
 	// 세션 획득
-	ISession* Acquire();
+	//
+	// 이 풀은 ClientSession 만 담는다. 기반 타입으로 돌려주면 호출부가
+	// 곧바로 구체 타입으로 되돌려야 하고, 그 자리에 dynamic_cast 가 붙었다.
+	ClientSession* Acquire();
 
 	// 세션 반환
-	void Release(ISession* session);
+	void Release(ClientSession* clientSession);
 
 	// 세션 수량 반환
 	uint32_t GetSessionCount() const;
@@ -60,14 +63,14 @@ public:
 	uint32_t CountSessionsFromAddress(const char* ipAddress) const;
 
 	// 세션 아이디 기반 세션 객체 반환
-	ISession* GetSession(const uint32_t sessionId);
+	ClientSession* GetSession(const uint32_t sessionId);   // 범위 밖이면 nullptr
 
 	// 세션 연결 해제
 	void RequestAllRecvSendIOCancel();
 	bool WaitForAllRecvSendIOCancelComplete(const uint32_t timeout_ms);
 	void DisconnectAllSessions();
 	uint32_t SendHeartbeatRequests();
-	uint32_t DisconnectZombieSessions(uint64_t nowTick, uint64_t heartbeatTimeout_ms);
+	uint32_t DisconnectZombieSessions(uint64_t nowTick, uint64_t heartbeatTimeout_ms, uint64_t releaseBudget_ms);
 
 	// Session Close 함수 포인터 설정
 	// closesocket 을 하나의 함수에서만 수행되도록 강제!

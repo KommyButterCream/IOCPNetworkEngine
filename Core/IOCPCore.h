@@ -35,7 +35,6 @@
 
 #include <stdint.h>
 
-class ISession;
 struct OverlappedEx;
 enum class IO_OPERATION;
 
@@ -93,7 +92,13 @@ protected:
 	// 서버, 클라이언트에서 override 필수!
 	// GQCS 에 통지 받은 IO 처리
 	virtual void HandleCompletion(ULONG_PTR completionKey, LPOVERLAPPED overlapped, DWORD bytesTransferred, BOOL completionStatus) = 0;
-	virtual void HandleSocketError(OverlappedEx* overlappedEx, ISession* session, int errorCode, IO_OPERATION ioOperation) = 0;
+
+	// HandleSocketError 는 여기에 두지 않는다.
+	//
+	// 순수 가상으로 선언돼 있었지만 이 기반 클래스는 한 번도 부르지 않았다.
+	// 부르는 쪽은 파생 클래스의 HandleCompletion 뿐이다. 계약이 아니라
+	// 주석 역할만 하면서, 세션 인자를 ISession* 로 고정시켜 파생 클래스가
+	// 실제 타입(ClientSession)을 쓰지 못하게 막고 있었다.
 
 	bool RegisterSocketToIOCP(ULONG_PTR completionKey, SOCKET socket);
 	static constexpr ULONG_PTR TERMINATE_CODE = 0xCAFE;

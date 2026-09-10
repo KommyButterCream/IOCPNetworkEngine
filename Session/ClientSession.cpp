@@ -65,13 +65,8 @@ namespace
 
 ClientSession::ClientSession()
 {
-	::ZeroMemory(&m_connectOverlapped, sizeof(OverlappedEx));
 	m_connectOverlapped.operation = IO_OPERATION::CONNECT;
-
-	::ZeroMemory(&m_recvOverlapped, sizeof(OverlappedEx));
 	m_recvOverlapped.operation = IO_OPERATION::RECV;
-
-	::ZeroMemory(&m_sendOverlapped, sizeof(OverlappedEx));
 	m_sendOverlapped.operation = IO_OPERATION::SEND;
 }
 
@@ -166,16 +161,12 @@ void ClientSession::ResetSession()
 
 	if (GetSessionRole() == SESSION_ROLE::CLIENT)
 	{
-		::ZeroMemory(&m_connectOverlapped, sizeof(OverlappedEx));
-		m_connectOverlapped.operation = IO_OPERATION::CONNECT;
+		m_connectOverlapped.Clear();
 	}
 	else if (GetSessionRole() == SESSION_ROLE::SERVER)
 	{
-		::ZeroMemory(&m_recvOverlapped, sizeof(OverlappedEx));
-		m_recvOverlapped.operation = IO_OPERATION::RECV;
-
-		::ZeroMemory(&m_sendOverlapped, sizeof(OverlappedEx));
-		m_sendOverlapped.operation = IO_OPERATION::SEND;
+		m_recvOverlapped.Clear();
+		m_sendOverlapped.Clear();
 	}
 }
 
@@ -198,15 +189,9 @@ void ClientSession::Finalize()
 
 	m_eventHandler = nullptr;
 
-	if (m_sendPacketQueue)
-	{
-		m_sendPacketQueue->Finalize();
-		delete m_sendPacketQueue;
-		m_sendPacketQueue = nullptr;
-	}
-
 	// 전송 중이던 패킷을 반환한다. (ResetSession 과 같은 이유)
-	// 풀 포인터들은 이 함수 끝에서 nullptr 로 바뀌므로 그 전에 반환해야 한다.
+	// 반드시 ReleaseMemoryResources 보다 먼저 해야 한다. 그쪽이
+	// m_sendPacketPool 을 nullptr 로 만들기 때문이다.
 	if (m_currentSendPacket)
 	{
 		if (m_packetMemoryPool && m_generalMemoryPool)
@@ -223,21 +208,9 @@ void ClientSession::Finalize()
 	}
 	m_sendOffset = 0;
 
-	if (m_jobQueue)
-	{
-		m_jobQueue->Reset();
-		delete m_jobQueue;
-		m_jobQueue = nullptr;
-	}
-
-	if (m_recvPacketBuffer)
-	{
-		m_recvPacketBuffer->Finalize();
-		delete m_recvPacketBuffer;
-		m_recvPacketBuffer = nullptr;
-	}
-
-	m_sendPacketPool = nullptr;
+	// 송신 큐 / 잡 큐 / 수신 링 / 송신 풀 포인터.
+	// InitializeMemoryPool 의 실패 정리와 같은 코드를 쓴다.
+	ReleaseMemoryResources();
 
 	if (GetSessionRole() == SESSION_ROLE::CLIENT)
 	{
@@ -257,16 +230,12 @@ void ClientSession::Finalize()
 
 	if (GetSessionRole() == SESSION_ROLE::CLIENT)
 	{
-		::ZeroMemory(&m_connectOverlapped, sizeof(OverlappedEx));
-		m_connectOverlapped.operation = IO_OPERATION::CONNECT;
+		m_connectOverlapped.Clear();
 	}
 	else if (GetSessionRole() == SESSION_ROLE::SERVER)
 	{
-		::ZeroMemory(&m_recvOverlapped, sizeof(OverlappedEx));
-		m_recvOverlapped.operation = IO_OPERATION::RECV;
-
-		::ZeroMemory(&m_sendOverlapped, sizeof(OverlappedEx));
-		m_sendOverlapped.operation = IO_OPERATION::SEND;
+		m_recvOverlapped.Clear();
+		m_sendOverlapped.Clear();
 	}
 
 	m_packetMemoryPool = nullptr;
@@ -322,27 +291,7 @@ bool ClientSession::OnConnect()
 bool ClientSession::OnDisconnect()
 {
 	ClearRemoteAddress();
-
-	if (::InterlockedExchange(&m_closing, 1) == 0)
-	{
-		if (!IsSocketInvalid())
-		{
-			// 소켓은 반드시 DetachSocket 으로 먼저 떼어낸 뒤 여기 와야 한다.
-			// 이전 메시지는 "CloseSocket(%d) 시작" 이었는데, 정상 경로에서는
-			// 소켓이 이미 분리되어 항상 -1 이 찍혀 오히려 오해를 유발했다.
-			LOGE("session %u disconnecting with a live socket %d. it was not detached",
-				GetSessionID(), static_cast<int>(GetClientSocket()));
-			ENGINE_BREAK_IF_DEBUGGER();
-			return false;
-		}
-
-		if (GetSessionRole() == SESSION_ROLE::CLIENT)
-			SetClientSessionState(ClientSessionState::DISCONNECTED);
-		else if (GetSessionRole() == SESSION_ROLE::SERVER)
-			SetServerSessionState(ServerSessionState::DISCONNECTED);
-	}
-
-	return true;
+	return BaseSession::OnDisconnect();
 }
 
 bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig)
@@ -355,78 +304,92 @@ bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketP
 		return false;
 	}
 
+	// 널 풀은 아무것도 잡기 전에 걸러낸다. 예전에는 이 검사가 세 번째
+	// 단계에 있어서, 실패가 확정된 뒤에 링 버퍼와 잡 큐를 만들었다 지웠다.
+	if (!hybridSendPacketPool)
+	{
+		ENGINE_VIOLATION("session %u received a null send packet pool", GetSessionID());
+		return false;
+	}
+
 	m_bufferConfig = bufferConfig;
 
 	m_jobMemoryPool = jobMemoryPool;
 	m_packetMemoryPool = packetMemoryPool;
 	m_generalMemoryPool = generalMemoryPool;
 
+	// 아래 어느 단계에서 실패하든 정리는 ReleaseMemoryResources 한 곳에서 한다.
+	//
+	// 예전에는 단계마다 되감기 코드를 계단식으로 복제했다. 다섯 벌이 조금씩
+	// 달랐고, 그중 하나는 m_sendPacketQueue 를 Finalize 없이 delete 해서
+	// 큐가 들고 있던 것을 반환하지 않았다. 단계를 하나 추가하면 여섯 번째
+	// 사본이 늘어나는 구조였다.
+
 	m_recvPacketBuffer = new RecvPacketBuffer();
-	if (!m_recvPacketBuffer)
-		return false;
-	if (!m_recvPacketBuffer->Initialize(packetMemoryPool, m_bufferConfig.recvRingSize, m_bufferConfig.maxRecvPacketSize))
+	if (!m_recvPacketBuffer ||
+		!m_recvPacketBuffer->Initialize(packetMemoryPool, m_bufferConfig.recvRingSize, m_bufferConfig.maxRecvPacketSize))
 	{
-		delete m_recvPacketBuffer;
-		m_recvPacketBuffer = nullptr;
+		ReleaseMemoryResources();
 		return false;
 	}
 
 	m_jobQueue = new SessionJobQueue(GetSessionRole(), jobMemoryPool, packetMemoryPool, generalMemoryPool);
 	if (!m_jobQueue)
 	{
-		m_recvPacketBuffer->Finalize();
-		delete m_recvPacketBuffer;
-		m_recvPacketBuffer = nullptr;
-		return false;
-	}
-
-	if (!hybridSendPacketPool)
-	{
-		delete m_jobQueue;
-		m_jobQueue = nullptr;
-		m_recvPacketBuffer->Finalize();
-		delete m_recvPacketBuffer;
-		m_recvPacketBuffer = nullptr;
+		ReleaseMemoryResources();
 		return false;
 	}
 
 	m_sendPacketPool = hybridSendPacketPool->GetPool(GetSessionID());
 	if (!m_sendPacketPool)
 	{
-		delete m_jobQueue;
-		m_jobQueue = nullptr;
-		m_recvPacketBuffer->Finalize();
-		delete m_recvPacketBuffer;
-		m_recvPacketBuffer = nullptr;
+		ReleaseMemoryResources();
 		return false;
 	}
 
 	m_sendPacketQueue = new SendPacketQueue();
-	if (!m_sendPacketQueue)
+	if (!m_sendPacketQueue ||
+		!m_sendPacketQueue->Initialize(m_sendPacketPool, packetMemoryPool, generalMemoryPool, m_bufferConfig.sendQueueDepth))
 	{
-		delete m_jobQueue;
-		m_jobQueue = nullptr;
-		m_recvPacketBuffer->Finalize();
-		delete m_recvPacketBuffer;
-		m_recvPacketBuffer = nullptr;
-		m_sendPacketPool = nullptr;
-		return false;
-	}
-
-	if (!m_sendPacketQueue->Initialize(m_sendPacketPool, packetMemoryPool, generalMemoryPool, m_bufferConfig.sendQueueDepth))
-	{
-		delete m_sendPacketQueue;
-		m_sendPacketQueue = nullptr;
-		delete m_jobQueue;
-		m_jobQueue = nullptr;
-		m_recvPacketBuffer->Finalize();
-		delete m_recvPacketBuffer;
-		m_recvPacketBuffer = nullptr;
-		m_sendPacketPool = nullptr;
+		ReleaseMemoryResources();
 		return false;
 	}
 
 	return true;
+}
+
+// InitializeMemoryPool 이 잡은 것만 되돌린다.
+// 실패 정리와 Finalize 가 같은 코드를 쓰게 하려고 뺐다.
+//
+// 순서는 Finalize 가 쓰던 것을 그대로 따른다. 송신 큐가 송신 풀을 참조하므로
+// 큐를 먼저 내리고 풀 포인터를 마지막에 놓는다.
+//
+// 부분 생성 상태에서 불려도 안전하다. 세 자원의 Finalize/Reset 은 전부
+// 널 검사로 시작한다.
+void ClientSession::ReleaseMemoryResources()
+{
+	if (m_sendPacketQueue)
+	{
+		m_sendPacketQueue->Finalize();
+		delete m_sendPacketQueue;
+		m_sendPacketQueue = nullptr;
+	}
+
+	if (m_jobQueue)
+	{
+		m_jobQueue->Reset();
+		delete m_jobQueue;
+		m_jobQueue = nullptr;
+	}
+
+	if (m_recvPacketBuffer)
+	{
+		m_recvPacketBuffer->Finalize();
+		delete m_recvPacketBuffer;
+		m_recvPacketBuffer = nullptr;
+	}
+
+	m_sendPacketPool = nullptr;
 }
 
 bool ClientSession::IsReady() const
@@ -440,7 +403,15 @@ bool ClientSession::IsReady() const
 	return false;
 }
 
-bool ClientSession::IsConnected() const
+// 소켓이 붙어 있는가. 인증 여부는 보지 않는다.
+//
+// IsEstablished(인증까지 끝났는가) 와 짝을 이루는 두 단계 중 아래쪽이다.
+// 시스템 패킷(인증 요청, 하트비트)은 인증 전에도 오가야 하므로 이쪽을 보고,
+// 서비스 패킷은 IsEstablished 를 본다. CanSendPacket 이 그 분기다.
+//
+// 예전에는 이 함수의 별칭인 IsConnected 가 따로 있었다. 두 이름이 같은 것을
+// 계산하니 독자는 없는 구분을 찾게 되고, 한쪽만 고치면 조용히 갈라진다.
+bool ClientSession::IsTransportConnected() const
 {
 	if (GetSessionRole() == SESSION_ROLE::CLIENT)
 		return (GetClientSessionState() == ClientSessionState::CONNECTED || GetClientSessionState() == ClientSessionState::AUTH_PENDING || GetClientSessionState() == ClientSessionState::ESTABLISHED);
@@ -460,11 +431,6 @@ bool ClientSession::IsEstablished() const
 		return (GetServerSessionState() == ServerSessionState::ESTABLISHED);
 
 	return false;
-}
-
-bool ClientSession::IsTransportConnected() const
-{
-	return IsConnected();
 }
 
 OverlappedEx& ClientSession::GetConnectOverlapped()
@@ -519,9 +485,7 @@ bool ClientSession::PostReceive()
 	// 같은 양을 받는 데 필요한 완료 횟수가 계속 늘어난다.
 	recvBuf.PrepareWrite();
 
-	m_recvOverlapped.operation = IO_OPERATION::RECV;
-	m_recvOverlapped.wsaBuffer.buf = recvBuf.GetWriteablePtr();
-	m_recvOverlapped.wsaBuffer.len = recvBuf.GetWriteableSize();
+	m_recvOverlapped.ResetForNextIO(GetSessionID(),	recvBuf.GetWriteablePtr(), recvBuf.GetWriteableSize());
 
 	if (m_recvOverlapped.wsaBuffer.len == 0)
 	{
@@ -640,11 +604,7 @@ bool ClientSession::PostCurrentSend()
 		return false;
 	}
 
-	::ZeroMemory(&m_sendOverlapped, sizeof(OverlappedEx));
-	m_sendOverlapped.operation = IO_OPERATION::SEND;
-	m_sendOverlapped.sessionId = GetSessionID();
-	m_sendOverlapped.wsaBuffer.buf = const_cast<char*>(m_currentSendPacket->packetData + m_sendOffset);
-	m_sendOverlapped.wsaBuffer.len = remainingBytes;
+	m_sendOverlapped.ResetForNextIO(GetSessionID(),	const_cast<char*>(m_currentSendPacket->packetData + m_sendOffset), remainingBytes);
 
 	DWORD flags = 0;
 	DWORD bytesSent = 0;
@@ -895,8 +855,14 @@ void ClientSession::HandleSocketError(int errorCode, IO_OPERATION ioOperation)
 
 	case WSAENOBUFS:
 	case WSAEMFILE:
-		//Log::Warn("[Session %u] System resource shortage (op=%d, err=%d)", m_sessionId, opType, err);
-		::Sleep(10); // 잠시 대기 후 재시도 가능 (너무 과도한 재시도는 주의)
+		// 예전에는 여기서 ::Sleep(10) 을 했다. 이 함수는 IOCP 완료 핸들러
+		// 안에서 불리므로 그 대기가 워커 스레드를 통째로 막는다. 게다가
+		// 잠든 뒤 재시도하는 코드가 없어서 잠들기만 했다.
+		//
+		// 자원 부족은 이 세션 하나의 문제가 아니라 프로세스 전체의 문제다.
+		// 세션 단위로 할 수 있는 일이 없으므로 크게 남기고 넘어간다.
+		LOGE("session %u hit a system resource shortage (error %d, op %d)",
+			GetSessionID(), errorCode, static_cast<int>(ioOperation));
 		break;
 
 	case ERROR_OPERATION_ABORTED:
@@ -963,6 +929,12 @@ void ClientSession::ClearCurrentJobData()
 {
 	// 현재 Send 중인 패킷 데이터에 대한 소유권 포기.
 	// Send IO Complete 시점에 패킷 메모리 해제함.
+	//
+	// SetCurrentJob 이 널로 불린 뒤에 여기 오면 예전에는 즉시 크래시였다.
+	// 이 클래스의 다른 함수들과 같이 널을 정상 입력으로 다룬다.
+	if (!m_currentJob)
+		return;
+
 	m_currentJob->data = nullptr;
 }
 

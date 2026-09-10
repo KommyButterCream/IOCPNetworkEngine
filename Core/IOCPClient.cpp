@@ -124,7 +124,12 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 	if (!m_packetMemoryPool)
 		return false;
 
-	m_packetMemoryPool->Initialize(configsPacket, _countof(configsPacket));
+	// 서버 쪽과 같은 이유로 반환값을 검사한다 (IOCPServer::StartServer 주석 참고).
+	if (!m_packetMemoryPool->Initialize(configsPacket, _countof(configsPacket)))
+	{
+		LOGE("failed to initialize the packet memory pool");
+		return false;
+	}
 
 	EngineMemoryPool::SlabConfig configsImageBuffer[] = {
 	{MEMORY_SIZE_1MB, 1},
@@ -136,7 +141,11 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 	if (!m_generalMemoryPool)
 		return false;
 
-	m_generalMemoryPool->Initialize(configsImageBuffer, _countof(configsImageBuffer));
+	if (!m_generalMemoryPool->Initialize(configsImageBuffer, _countof(configsImageBuffer)))
+	{
+		LOGE("failed to initialize the general memory pool");
+		return false;
+	}
 
 	// PacketSend 를 위한 패킷 버퍼 풀 생성(1개)
 	m_hybridSendPacketPool = new HybridSendPacketPool();
@@ -159,7 +168,14 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 	m_session = new ClientSession;
 	if (!m_session)
 		return false;
-	m_session->Initialize(SESSION_ROLE::CLIENT, 0);
+	// Initialize 는 CreateEvent 가 실패하면 false 다. 그 세션은
+	// m_ioCancelCompleteEvent 없이 살아남고, WaitForIOCancelComplete 가
+	// 널 이벤트를 보고 무조건 true 를 반환해 취소 대기가 무의미해진다.
+	if (!m_session->Initialize(SESSION_ROLE::CLIENT, 0))
+	{
+		LOGE("failed to initialize the client session");
+		return false;
+	}
 	if (!m_session->InitializeMemoryPool(m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, bufferConfig))
 		return false;
 	m_session->SetEventHandler(this);
@@ -172,7 +188,11 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 	if (!m_clientSessionScheduler)
 		return false;
 
-	m_clientSessionScheduler->Initialize(m_session, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool);
+	if (!m_clientSessionScheduler->Initialize(m_session, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool))
+	{
+		LOGE("failed to initialize the client session scheduler");
+		return false;
+	}
 
 	// 비동기 Connect To Server
 	// 연결에 대한 통지를 GQCS 에서 처리 한다.
@@ -256,7 +276,9 @@ void IOCPClient::StopClient()
 
 void IOCPClient::HandleCompletion(ULONG_PTR completionKey, LPOVERLAPPED overlapped, DWORD bytesTransferred, BOOL completionStatus)
 {
-	ISession* session = reinterpret_cast<ISession*>(completionKey);
+	// 완료 키에 넣은 것이 ClientSession* 다 (PostConnect 의
+	// RegisterSocketToIOCP 참고). 넣은 타입 그대로 받는다.
+	ClientSession* session = reinterpret_cast<ClientSession*>(completionKey);
 	OverlappedEx* overlappedEx = reinterpret_cast<OverlappedEx*>(overlapped);
 
 	// GQCS 자체가 실패하면 overlapped 가 nullptr 로 온다.
@@ -292,7 +314,7 @@ void IOCPClient::HandleCompletion(ULONG_PTR completionKey, LPOVERLAPPED overlapp
 	}
 }
 
-void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ISession* session, int errorCode, IO_OPERATION ioOperation)
+void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* session, int errorCode, IO_OPERATION ioOperation)
 {
 	LOGW("session %u socket error %d on io %d", session->GetSessionID(), errorCode, (int)ioOperation);
 
@@ -427,16 +449,13 @@ void IOCPClient::HandleConnect(uint32_t sessionId, DWORD bytesTransferred)
 	OnClientConnect(m_session);
 }
 
-void IOCPClient::HandleConnectCancelled(OverlappedEx* overlappedEx, ISession* session)
+void IOCPClient::HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSession* clientSession)
 {
 	LOGW("ConnectEx was cancelled");
 
-	ClientSession* clientSession = dynamic_cast<ClientSession*>(session);
-
 	if (!clientSession)
 	{
-		LOGE("client session cast failed : the session is not a ClientSession");
-
+		ENGINE_VIOLATION("connect cancellation arrived with no session");
 		return;
 	}
 
@@ -448,7 +467,7 @@ void IOCPClient::HandleConnectCancelled(OverlappedEx* overlappedEx, ISession* se
 	OnDisconnectRequest(clientSession);
 }
 
-void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)
+void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
 {
 	if (!session)
 		return;
@@ -578,7 +597,7 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD
 	}
 }
 
-void IOCPClient::HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* session)
+void IOCPClient::HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* session)
 {
 	if (!session)
 		return;
@@ -592,7 +611,7 @@ void IOCPClient::HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* sessi
 	LOGI("session %u recv cancelled", session->GetSessionID());
 }
 
-void IOCPClient::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)
+void IOCPClient::HandleSend(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
 {
 	if (!session)
 		return;
@@ -618,7 +637,7 @@ void IOCPClient::HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD
 	clientSession->DecrementIO();
 }
 
-void IOCPClient::HandleSendCancelled(OverlappedEx* overlappedEx, ISession* session)
+void IOCPClient::HandleSendCancelled(OverlappedEx* overlappedEx, ClientSession* session)
 {
 	if (!session)
 		return;
@@ -632,7 +651,7 @@ void IOCPClient::HandleSendCancelled(OverlappedEx* overlappedEx, ISession* sessi
 	LOGI("session %u send cancelled", session->GetSessionID());
 }
 
-void IOCPClient::HandleSessionDisconnected(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred)
+void IOCPClient::HandleSessionDisconnected(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
 {
 	// 세션의 정상 종료 시퀀스
 
@@ -747,14 +766,11 @@ bool IOCPClient::PrepareConnect()
 	return true;
 }
 
-bool IOCPClient::PostConnect(ISession* session)
+bool IOCPClient::PostConnect(ClientSession* clientSession)
 {
-	ClientSession* clientSession = dynamic_cast<ClientSession*>(session);
-
 	if (!clientSession)
 	{
-		LOGE("client session cast failed : the session is not a ClientSession");
-
+		ENGINE_VIOLATION("PostConnect called with no session");
 		return false;
 	}
 
@@ -775,7 +791,7 @@ bool IOCPClient::PostConnect(ISession* session)
 	}
 
 	// GQCS 사용을 위한 IOCP 등록
-	if (!IOCPCore::RegisterSocketToIOCP((ULONG_PTR)session, session->GetClientSocket()))
+	if (!IOCPCore::RegisterSocketToIOCP((ULONG_PTR)clientSession, clientSession->GetClientSocket()))
 		return false;
 
 	// IO 수량 증가(ConnectEx 에 대한 IO)
@@ -784,10 +800,9 @@ bool IOCPClient::PostConnect(ISession* session)
 	// Overlapped 구조체 초기화
 	OverlappedEx& overlappedEx = clientSession->GetConnectOverlapped();  // session이 미리 생성한 OverlappedEx 포인터 반환
 
-	overlappedEx.wsaBuffer.len = 0;
-	overlappedEx.wsaBuffer.buf = nullptr;
-	overlappedEx.operation = IO_OPERATION::CONNECT;
-	overlappedEx.sessionId = clientSession->GetSessionID();
+	// ConnectEx 는 보낼 데이터를 넘기지 않으므로 wsaBuffer 는 비워 둔다.
+	overlappedEx.ResetForNextIO(clientSession->GetSessionID());
+
 	clientSession->SetClientSessionState(ClientSessionState::CONNECTING);
 
 	DWORD bytesSent = 0;
@@ -821,16 +836,37 @@ bool IOCPClient::PostConnect(ISession* session)
 	return true;
 }
 
+// 이 클라이언트가 가진 세션은 m_session 하나뿐이다.
+//
+// 예전에는 이 자리에서 dynamic_cast<ClientSession*> 로 되돌렸다. 유일한
+// 세션이 ClientSession 이라 그 RTTI 조회는 실패할 수 없었고, 그런데도
+// 실패 분기가 "캐스팅 실패" 라는 원인과 무관한 문구를 남기고 있었다.
+//
+// 정말 확인해야 할 것은 타입이 아니라 신원이다. 들어온 포인터가 이 객체의
+// 세션이 아니라면 라우팅이 깨진 것이고, 그건 캐스팅으로 덮을 일이 아니다.
+ClientSession* IOCPClient::ResolveOwnSession(ISession* session, const char* calledFrom)
+{
+	if (!session)
+	{
+		ENGINE_VIOLATION("%s received a null session", calledFrom);
+		return nullptr;
+	}
+
+	if (session != m_session)
+	{
+		ENGINE_VIOLATION("%s received session %p but this client owns %p",
+			calledFrom, static_cast<const void*>(session), static_cast<const void*>(m_session));
+		return nullptr;
+	}
+
+	return m_session;
+}
+
 void IOCPClient::OnDisconnectRequest(ISession* session)
 {
-	ClientSession* clientSession = dynamic_cast<ClientSession*>(session);
-
+	ClientSession* clientSession = ResolveOwnSession(session, "OnDisconnectRequest");
 	if (!clientSession)
-	{
-		LOGE("client session cast failed : the session is not a ClientSession");
-
 		return;
-	}
 
 	if (clientSession->GetClientSocket() != INVALID_SOCKET)
 	{

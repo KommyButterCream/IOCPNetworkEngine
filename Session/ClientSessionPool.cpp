@@ -62,7 +62,7 @@ ClientSessionPool::~ClientSessionPool()
 	}
 }
 
-ISession* ClientSessionPool::Acquire()
+ClientSession* ClientSessionPool::Acquire()
 {
 	Core::Sync::SRWWriteLockGuard lockguard(m_lock);
 
@@ -86,10 +86,8 @@ ISession* ClientSessionPool::Acquire()
 	return node->session;
 }
 
-void ClientSessionPool::Release(ISession* session)
+void ClientSessionPool::Release(ClientSession* clientSession)
 {
-	// 이 풀은 ClientSession 만 담으므로 RTTI 조회가 필요하지 않다.
-	ClientSession* clientSession = static_cast<ClientSession*>(session);
 	ENGINE_CHECK_RETVOID(clientSession != nullptr, "Release called with a null session");
 
 	const uint32_t sessionId = clientSession->GetSessionID();
@@ -119,7 +117,7 @@ void ClientSessionPool::Release(ISession* session)
 		return;
 	}
 
-	if (clientSession->IsConnected())
+	if (clientSession->IsTransportConnected())
 	{
 		if (!clientSession->CancelPendingIO())
 		{
@@ -216,8 +214,20 @@ uint32_t ClientSessionPool::CountSessionsFromAddress(const char* ipAddress) cons
 	return count;
 }
 
-ISession* ClientSessionPool::GetSession(const uint32_t sessionId)
+ClientSession* ClientSessionPool::GetSession(const uint32_t sessionId)
 {
+	// 이 함수만 검사가 없었다. 같은 클래스의 Release 도, AcceptSessionPool 의
+	// 같은 함수도 범위를 본다. 여기만 빠져 있으면 잘못된 id 하나가 배열 밖을
+	// 읽고 그 쓰레기 포인터가 세션으로 유통된다.
+	if (!m_nodes)
+		return nullptr;
+
+	if (sessionId >= m_capacity)
+	{
+		LOGE("GetSession called with session id %u but capacity is %u", sessionId, m_capacity);
+		return nullptr;
+	}
+
 	return m_nodes[sessionId].session;
 }
 
@@ -230,7 +240,7 @@ void ClientSessionPool::RequestAllRecvSendIOCancel()
 	{
 		ClientSession* session = &m_sessions[i];
 
-		if (session != nullptr && session->IsConnected())
+		if (session != nullptr && session->IsTransportConnected())
 		{
 			if (!session->CancelPendingIO())
 			{
@@ -249,7 +259,7 @@ bool ClientSessionPool::WaitForAllRecvSendIOCancelComplete(const uint32_t timeou
 	{
 		ClientSession* session = &m_sessions[i];
 
-		if (session != nullptr && session->IsConnected())
+		if (session != nullptr && session->IsTransportConnected())
 		{
 			if (!session->WaitForIOCancelComplete(timeout_ms))
 			{
@@ -271,7 +281,7 @@ void ClientSessionPool::DisconnectAllSessions()
 	{
 		ClientSession* session = &m_sessions[i];
 
-		if (session != nullptr && session->IsConnected())
+		if (session != nullptr && session->IsTransportConnected())
 		{
 			if (m_closeSocketFunc)
 			{
@@ -319,19 +329,20 @@ uint32_t ClientSessionPool::SendHeartbeatRequests()
 	return sentCount;
 }
 
-uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t heartbeatTimeout_ms)
+uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t heartbeatTimeout_ms, uint64_t releaseBudget_ms)
 {
 	if (!m_sessions || heartbeatTimeout_ms == 0)
 	{
 		return 0;
 	}
 
+	const uint64_t passBeginTick = ::GetTickCount64();
 	uint32_t disconnectedCount = 0;
 
 	for (uint32_t i = 0; i < m_capacity; ++i)
 	{
 		ClientSession* session = &m_sessions[i];
-		if (!session || !session->IsConnected())
+		if (!session || !session->IsTransportConnected())
 		{
 			continue;
 		}
@@ -349,6 +360,28 @@ uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t 
 		if (!session->IsHeartbeatTimedOut(nowTick, heartbeatTimeout_ms))
 		{
 			continue;
+		}
+
+		// 여기서부터가 막힐 수 있는 구간이다.
+		
+		// Release 안에는 최대 10초짜리 WaitForIOCancelComplete 가 있고,
+		// 이 루프는 좀비 수만큼 그 대기를 직렬로 쌓는다. 부르는 쪽은
+		// HeartbeatThread 한 스레드이므로 그 시간 동안 하트비트 발송과
+		// accept 슬롯 보충이 함께 멈춘다.
+		
+		// 하트비트 발송이 멈추면 멀쩡한 세션도 응답할 기회를 잃고 좀비로
+		// 판정된다. 실측한 연쇄다 — 정리 한 건이 2초일 때 좀비 6개면
+		// 발송 간격이 17초로 벌어지고(주기는 5초), 정상 응답하던 세션이
+		// 타임아웃 판정으로 끊겼다.
+	
+		// 그래서 한 주기에 쓸 시간에 상한을 둔다. 남은 좀비는 다음 주기가
+		// 가져간다. 한 건은 예산과 무관하게 처리하므로 예산이 아무리
+		// 작아도 정리가 영원히 밀리지는 않는다.
+		if (disconnectedCount > 0 && ::GetTickCount64() - passBeginTick >= releaseBudget_ms)
+		{
+			LOGW("zombie release budget of %llu ms is used up after %u sessions. the rest are left for the next cycle",
+				releaseBudget_ms, disconnectedCount);
+			break;
 		}
 
 		LOGW("session %u heartbeat timeout, disconnecting", session->GetSessionID());

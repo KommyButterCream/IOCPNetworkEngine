@@ -61,8 +61,10 @@ public:
 	virtual uint32_t GetSessionID() const;
 	virtual void SetSessionID(uint32_t sessionId);
 
-	virtual void IncrementIO();
-	virtual void DecrementIO();
+	// 엔진 내부 전용. ISession 에는 없다 (이유는 그쪽 주석).
+	// 파생 클래스가 재정의하지 않으므로 가상일 이유도 없다.
+	void IncrementIO();
+	void DecrementIO();
 
 	virtual bool CancelPendingIO();
 	virtual bool WaitForIOCancelComplete(const uint32_t timeout_ms);

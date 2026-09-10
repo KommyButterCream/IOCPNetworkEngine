@@ -24,7 +24,7 @@ bool SessionManager::Initialize(const uint32_t acceptSessionCount, const uint32_
 	m_clientSessionCount = clientSessionCount;
 
 	m_acceptSessionPool = new AcceptSessionPool(acceptSessionCount);
-	if (!m_acceptSessionPool)
+	if (!m_acceptSessionPool || !m_acceptSessionPool->IsReady())
 		return false;
 
 	m_acceptSessionPool->SetSocketCloseFunc(closeSocketFunc);
@@ -91,6 +91,12 @@ bool SessionManager::WaitForAllAcceptIOCancelComplete(const uint32_t timeout_ms)
 
 bool SessionManager::IsClientSessionFull() const
 {
+	// 이 파일의 다른 함수들과 달리 널 검사가 빠져 있었다.
+	// 풀이 없으면 세션을 내줄 수 없으므로 "가득 찼다" 가 안전한 답이다.
+	// 그러면 호출부(HandleAccept)가 임대를 시도하지 않고 연결을 거절한다.
+	if (!m_clientSessionPool)
+		return true;
+
 	return m_clientSessionPool->IsSessionFull();
 }
 
@@ -110,7 +116,7 @@ uint32_t SessionManager::CountClientSessionsFromAddress(const char* ipAddress) c
 	return m_clientSessionPool->CountSessionsFromAddress(ipAddress);
 }
 
-ISession* SessionManager::GetClientSession(const uint32_t sessionId)
+ClientSession* SessionManager::GetClientSession(const uint32_t sessionId)
 {
 	if (!m_clientSessionPool)
 		return nullptr;
@@ -126,7 +132,7 @@ uint32_t SessionManager::GetClientSessionCount() const noexcept
 	return m_clientSessionCount;
 }
 
-ISession* SessionManager::AcquireClientSession()
+ClientSession* SessionManager::AcquireClientSession()
 {
 	if (!m_clientSessionPool)
 		return nullptr;
@@ -135,7 +141,7 @@ ISession* SessionManager::AcquireClientSession()
 	// 프리 리스트가 비었다는 뜻이고, 양보 없는 루프로는 채워질 수 없으므로
 	// CPU 만 태우는 코드였다. 게다가 정확히 100번째에 성공하면
 	// retryCount == maxRetryCount 가 참이 되어 성공했는데도 단정에 걸렸다.
-	ISession* session = m_clientSessionPool->Acquire();
+	ClientSession* session = m_clientSessionPool->Acquire();
 
 	if (!session)
 	{
@@ -159,7 +165,11 @@ void SessionManager::ReleaseClientSession(ISession* session)
 		"ReleaseClientSession called with session id %u but capacity is %u",
 		sessionId, m_clientSessionPool->GetSessionCount());
 
-	m_clientSessionPool->Release(session);
+	// 기반 타입이 들어오는 유일한 지점이다. ISessionEvent::OnDisconnectRequest
+	// 가 ISession* 로 고정돼 있어서 여기까지는 기반 타입으로 온다.
+	// 클라 세션 풀에는 ClientSession 만 들어가므로 RTTI 조회는 필요 없다.
+	// 경계에서 한 번만 좁히고, 그 아래는 전부 구체 타입으로 다닌다.
+	m_clientSessionPool->Release(static_cast<ClientSession*>(session));
 }
 
 void SessionManager::RequestAllRecvSendIOCancel()
@@ -196,14 +206,14 @@ uint32_t SessionManager::SendHeartbeatRequests()
 	return m_clientSessionPool->SendHeartbeatRequests();
 }
 
-uint32_t SessionManager::DisconnectZombieSessions(uint64_t heartbeatTimeout_ms)
+uint32_t SessionManager::DisconnectZombieSessions(uint64_t heartbeatTimeout_ms, uint64_t releaseBudget_ms)
 {
 	if (!m_clientSessionPool || heartbeatTimeout_ms == 0)
 	{
 		return 0;
 	}
 
-	return m_clientSessionPool->DisconnectZombieSessions(::GetTickCount64(), heartbeatTimeout_ms);
+	return m_clientSessionPool->DisconnectZombieSessions(::GetTickCount64(), heartbeatTimeout_ms, releaseBudget_ms);
 }
 
 void SessionManager::OnDisconnectRequest(ISession* session)

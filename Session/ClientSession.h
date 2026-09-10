@@ -94,9 +94,10 @@ public:
 	bool InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig);
 
 	bool IsReady() const;
-	bool IsConnected() const;
-	bool IsEstablished() const;
+	// 두 단계다. IsTransportConnected 는 소켓이 붙었는가,
+	// IsEstablished 는 인증까지 끝났는가. (설명은 .cpp 주석)
 	bool IsTransportConnected() const;
+	bool IsEstablished() const;
 
 	OverlappedEx& GetConnectOverlapped();
 
@@ -147,6 +148,10 @@ public:
 
 private:
 	bool CanSendPacket(PACKET_ID_TYPE packetId) const;
+
+	// InitializeMemoryPool 이 잡은 자원만 되돌린다.
+	// 그쪽의 실패 정리와 Finalize 가 함께 쓴다. 부분 생성 상태에서도 안전하다.
+	void ReleaseMemoryResources();
 
 public:
 	// Callback Func

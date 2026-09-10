@@ -77,18 +77,20 @@ private:
 private:
 	// GQCS 에 통지 받은 IO 처리
 	void HandleCompletion(ULONG_PTR completionKey, LPOVERLAPPED overlapped, DWORD bytesTransferred, BOOL completionStatus) override;
-	void HandleSocketError(OverlappedEx* overlappedEx, ISession* session, int errorCode, IO_OPERATION ioOperation) override;
+	// 아래 핸들러들의 세션 인자는 전부 ClientSession 이다.
+	// 이 클라이언트가 가진 세션은 m_session 하나뿐이다.
+	void HandleSocketError(OverlappedEx* overlappedEx, ClientSession* session, int errorCode, IO_OPERATION ioOperation);
 
 	void HandleConnect(uint32_t sessionId, DWORD bytesTransferred);
-	void HandleConnectCancelled(OverlappedEx* overlappedEx, ISession* session);
+	void HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSession* session);
 
-	void HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred);
-	void HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* session);
+	void HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred);
+	void HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* session);
 
-	void HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred);
-	void HandleSendCancelled(OverlappedEx* overlappedEx, ISession* session);
+	void HandleSend(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred);
+	void HandleSendCancelled(OverlappedEx* overlappedEx, ClientSession* session);
 
-	void HandleSessionDisconnected(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred);
+	void HandleSessionDisconnected(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred);
 
 private:
 	bool CreateConnectSocket();
@@ -101,11 +103,16 @@ private:
 	void FinalizeGUIDConnectEx();
 
 	bool PrepareConnect();
-	bool PostConnect(ISession* session);
+	bool PostConnect(ClientSession* clientSession);
 	bool SendSystemAuthRequest(ClientSession* session);
 	bool HandleSystemPacket(ClientSession* session, uint16_t packetId, const char* packetData, uint32_t packetSize);
 
 	void OnDisconnectRequest(ISession* session) override;
+
+	// ISessionEvent 의 시그니처가 ISession* 로 고정돼 있어 기반 타입이
+	// 들어오는 유일한 지점이다. 그 포인터가 정말 이 클라이언트의 세션인지
+	// 확인해서 돌려준다. 아니면 nullptr 과 함께 위반을 남긴다.
+	ClientSession* ResolveOwnSession(ISession* session, const char* calledFrom);
 
 public:
 	PacketHandlerTable* GetPacketHandlerTable() const;

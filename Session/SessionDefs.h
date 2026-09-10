@@ -20,5 +20,4 @@ enum class SESSION_ROLE
 };
 
 
-static constexpr uint32_t DUMMY_SESSION_ID = UINT32_MAX - 1;
 static constexpr uint32_t INVALID_SESSION_ID = UINT32_MAX;

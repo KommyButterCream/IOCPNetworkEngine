@@ -13,6 +13,7 @@
 
 class ISession;
 class AcceptSession;
+class ClientSession;
 class ClientSessionPool;
 class AcceptSessionPool;
 class HybridSendPacketPool;
@@ -43,8 +44,6 @@ public:
 
 	// Accept Session //
 public:
-	// 풀이 AcceptSession 만 담으므로 구체 타입을 그대로 돌려준다.
-	// ISession* 으로 올려 놓으면 호출부가 매번 되돌리는 캐스팅을 해야 한다.
 	AcceptSession* GetAcceptSession(const uint32_t sessionId);
 	uint32_t GetAcceptSessionCount() const noexcept;
 
@@ -57,17 +56,18 @@ public:
 	uint32_t GetClientSessionInUseCount() const;
 	uint32_t CountClientSessionsFromAddress(const char* ipAddress) const;
 
-	ISession* GetClientSession(const uint32_t sessionId);
+	ClientSession* GetClientSession(const uint32_t sessionId);
 	uint32_t GetClientSessionCount() const noexcept;
 
-	ISession* AcquireClientSession();
+	ClientSession* AcquireClientSession();
 	void ReleaseClientSession(ISession* session);
 
 	void RequestAllRecvSendIOCancel();
 	bool WaitForAllRecvSendIOCancelComplete(const uint32_t timeout_ms);
 	void DisconnectAllSessions();
 	uint32_t SendHeartbeatRequests();
-	uint32_t DisconnectZombieSessions(uint64_t heartbeatTimeout_ms);
+
+	uint32_t DisconnectZombieSessions(uint64_t heartbeatTimeout_ms, uint64_t releaseBudget_ms);
 
 	void OnDisconnectRequest(ISession* session) override;
 };

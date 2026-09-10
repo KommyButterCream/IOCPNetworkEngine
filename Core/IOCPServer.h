@@ -109,15 +109,18 @@ private:
 private:
 	// GQCS 에 통지 받은 IO 처리
 	void HandleCompletion(ULONG_PTR completionKey, LPOVERLAPPED overlapped, DWORD bytesTransferred, BOOL completionStatus) override;
-	void HandleSocketError(OverlappedEx* overlappedEx, ISession* session, int errorCode, IO_OPERATION ioOperation) override;
+	// 아래 핸들러들의 세션 인자는 전부 ClientSession 이다.
+	// RECV/SEND 완료 키에 등록되는 것이 ClientSession 뿐이기 때문이다.
+	// (ACCEPT 는 완료 키가 아니라 overlappedEx->sessionId 로 라우팅한다)
+	void HandleSocketError(OverlappedEx* overlappedEx, ClientSession* session, int errorCode, IO_OPERATION ioOperation);
 
 	void HandleAccept(uint32_t sessionId, DWORD bytesTransferred);
 	void HandleAcceptIOCancelled(uint32_t sessionId);
-	void HandleRecv(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred);
-	void HandleRecvCancelled(OverlappedEx* overlappedEx, ISession* session);
-	void HandleSend(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred);
-	void HandleSendCancelled(OverlappedEx* overlappedEx, ISession* session);
-	void HandleSessionDisconnected(OverlappedEx* overlappedEx, ISession* session, DWORD bytesTransferred);
+	void HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred);
+	void HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* session);
+	void HandleSend(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred);
+	void HandleSendCancelled(OverlappedEx* overlappedEx, ClientSession* session);
+	void HandleSessionDisconnected(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred);
 
 private:
 	bool CreateListenSocket(const char* ipAddress, uint16_t port);
