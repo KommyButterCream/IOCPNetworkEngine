@@ -27,7 +27,7 @@ struct PACKET_HEADER
 
 	~PACKET_HEADER() = default;
 
-	void reset()
+	void Reset()
 	{
 		packetId = ToPacketID(PACKET_ID::NONE);
 		packetSize = 0;

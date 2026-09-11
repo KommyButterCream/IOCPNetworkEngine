@@ -101,20 +101,22 @@ bool SendPacketQueue::Enqueue(void** packetData, uint32_t packetSize)
 	if (!packetData || !(*packetData) || packetSize == 0 || packetSize > PACKET_SIZE_LIMIT)
 		return false;
 
+	// 풀 획득을 락 밖에서 먼저 한다.
+	//
+	// 예전에는 락을 잡은 채 Acquire 를 불렀다. 고갈 시 그 안에서 LOGW 까지
+	// 나가므로 "큐 락 -> 로거 락" 순서가 생기고, 락 보유 시간도 SList pop
+	// 만큼 길어진다. 자리가 없으면 방금 얻은 블록을 되돌려주면 된다.
+	SendPacketBuffer* block = m_packetPool->Acquire();
+	if (!block)
+		return false;
+
 	::AcquireSRWLockExclusive(&m_srwLock);
 
 	if (m_count >= m_capacity)
 	{
 		::ReleaseSRWLockExclusive(&m_srwLock);
 
-		return false;
-	}
-
-	SendPacketBuffer* block = m_packetPool->Acquire();
-	if (!block)
-	{
-		::ReleaseSRWLockExclusive(&m_srwLock);
-
+		m_packetPool->Release(block);
 		return false;
 	}
 
@@ -149,20 +151,22 @@ bool SendPacketQueue::EnqueueShared(const void* packetData, uint32_t packetSize,
 	if (!packetData || packetSize == 0 || packetSize > PACKET_SIZE_LIMIT || !releaseFunc)
 		return false;
 
+	// 풀 획득을 락 밖에서 먼저 한다.
+	//
+	// 예전에는 락을 잡은 채 Acquire 를 불렀다. 고갈 시 그 안에서 LOGW 까지
+	// 나가므로 "큐 락 -> 로거 락" 순서가 생기고, 락 보유 시간도 SList pop
+	// 만큼 길어진다. 자리가 없으면 방금 얻은 블록을 되돌려주면 된다.
+	SendPacketBuffer* block = m_packetPool->Acquire();
+	if (!block)
+		return false;
+
 	::AcquireSRWLockExclusive(&m_srwLock);
 
 	if (m_count >= m_capacity)
 	{
 		::ReleaseSRWLockExclusive(&m_srwLock);
 
-		return false;
-	}
-
-	SendPacketBuffer* block = m_packetPool->Acquire();
-	if (!block)
-	{
-		::ReleaseSRWLockExclusive(&m_srwLock);
-
+		m_packetPool->Release(block);
 		return false;
 	}
 
@@ -213,16 +217,27 @@ void SendPacketQueue::Reset()
 
 	::AcquireSRWLockExclusive(&m_srwLock);
 
-	// 남아 있는 블록 반환
-	for (int i = 0; i < m_capacity; ++i)
+	// 남아 있는 블록 반환.
+	//
+	// 예전에는 용량 전체를 훑었다. 담긴 것은 head 부터 m_count 개뿐이고
+	// 나머지는 항상 nullptr 이다. depth 4096 인 세션을 정리할 때마다 4096회를
+	// 돌았고, disconnect storm 에서는 세션 수만큼 곱해졌다.
+	for (int32_t i = 0; i < m_count; ++i)
 	{
-		if (m_queue[i])
-		{
-			ReleaseQueuedPacket(*m_packetMemoryPool, *m_generalMemoryPool, m_queue[i]);
+		const int32_t index = (m_head + i) & m_capacityMask;
 
-			m_packetPool->Release(m_queue[i]);
-			m_queue[i] = nullptr;
+		if (!m_queue[index])
+		{
+			// head..head+count 구간은 반드시 채워져 있어야 한다.
+			ENGINE_VIOLATION("send queue slot %d is empty inside head..count (head %d, count %d)",
+				index, m_head, m_count);
+			continue;
 		}
+
+		ReleaseQueuedPacket(*m_packetMemoryPool, *m_generalMemoryPool, m_queue[index]);
+
+		m_packetPool->Release(m_queue[index]);
+		m_queue[index] = nullptr;
 	}
 
 	m_head = 0;

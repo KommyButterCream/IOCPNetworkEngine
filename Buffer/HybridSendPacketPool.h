@@ -1,5 +1,13 @@
 ﻿#pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+// GetMaximumProcessorCount / ALL_PROCESSOR_GROUPS 를 쓴다.
+// 예전에는 SendPacketPool.h 가 전이로 끌어오는 Windows.h 에 얹혀 있었고,
+// include 순서가 바뀌면 깨지는 상태였다.
+#include <Windows.h>
 #include <stdint.h>
 
 // Session 마다 SendPacketBuffer 를 고정 크기로 가지고 있으면 Session 의 크기가 너무 커지고

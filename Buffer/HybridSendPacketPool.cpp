@@ -1,6 +1,10 @@
 ﻿#include "HybridSendPacketPool.h"
 #include "SendPacketPool.h"
 
+#include "../../Core/Util/Logger.h"
+
+using namespace Core::Util;
+
 HybridSendPacketPool::HybridSendPacketPool()
 {
 }
@@ -50,6 +54,14 @@ bool HybridSendPacketPool::Initialize(uint32_t totalBlockCount, uint32_t hybridP
 		return false;
 	}
 
+	// 나머지는 버려진다. 총량을 그대로 쓸 수 없다는 사실을 남긴다.
+	const uint32_t discarded = m_totalBlockCount - (perPoolCount * m_hybridPoolCount);
+	if (discarded > 0)
+	{
+		LOGI("send packet pool : %u blocks over %u shards leaves %u unused (%u per shard)",
+			m_totalBlockCount, m_hybridPoolCount, discarded, perPoolCount);
+	}
+
 	m_hybridPools = new SendPacketPool * [m_hybridPoolCount] {};
 	if (!m_hybridPools)
 	{
@@ -78,10 +90,13 @@ bool HybridSendPacketPool::Initialize(uint32_t totalBlockCount, uint32_t hybridP
 
 void HybridSendPacketPool::Finalize()
 {
-	for (uint32_t i = 0; i < m_hybridPoolCount; i++)
+	if (m_hybridPools)
 	{
-		if (m_hybridPools && m_hybridPools[i])
+		for (uint32_t i = 0; i < m_hybridPoolCount; i++)
 		{
+			if (!m_hybridPools[i])
+				continue;
+
 			m_hybridPools[i]->Finalize();
 			delete m_hybridPools[i];
 			m_hybridPools[i] = nullptr;

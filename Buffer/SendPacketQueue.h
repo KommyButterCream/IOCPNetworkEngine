@@ -35,9 +35,9 @@ private:
 	bool IsEmptyLocked() const;
 
 private:
-	alignas(64) int32_t m_head = 0;
-	alignas(64) int32_t m_tail = 0;
-	alignas(64) mutable SRWLOCK m_srwLock = SRWLOCK_INIT;
+	mutable SRWLOCK m_srwLock = SRWLOCK_INIT;
+	int32_t m_head = 0;
+	int32_t m_tail = 0;
 
 	SendPacketBuffer** m_queue = nullptr;
 

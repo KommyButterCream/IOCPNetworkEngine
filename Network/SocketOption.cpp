@@ -12,7 +12,7 @@ using namespace Core::Util;
 #pragma comment(lib, "mswsock.lib") // for AcceptEX / ConnectEx
 
 // Reuse address
-bool SocketOption::SetResueAddress(SOCKET socket)
+bool SocketOption::SetReuseAddress(SOCKET socket)
 {
 	BOOL option = TRUE;
 
