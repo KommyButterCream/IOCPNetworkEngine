@@ -10,8 +10,6 @@
 
 #include "../Buffer/RecvPacketBuffer.h"
 #include "../Buffer/SendPacketQueue.h"
-#include "../Buffer/SendPacketPool.h"
-#include "../Buffer/HybridSendPacketPool.h"
 #include "../Memory/EngineMemoryPoolHelper.h"
 #include "../../Core/Util/Logger.h"
 
@@ -27,23 +25,6 @@ using namespace Core::Util;
 
 namespace
 {
-	void ReleaseSendPacketData(EngineMemoryPool& packetMemoryPool, EngineMemoryPool& generalMemoryPool, SendPacketBuffer* packetBuffer)
-	{
-		if (!packetBuffer || !packetBuffer->packetData)
-			return;
-
-		if (packetBuffer->releaseFunc)
-		{
-			packetBuffer->releaseFunc(packetBuffer->packetData, packetBuffer->releaseContext);
-		}
-		else
-		{
-			MEMORY_POOL::ReleasePacket(packetMemoryPool, generalMemoryPool, packetBuffer->packetData);
-		}
-
-		packetBuffer->Reset();
-	}
-
 	// 상대가 연결을 끊어서 발생한 I/O 실패인지 판정한다.
 	// 이건 정상적인 종료 경로이므로 ERROR 로 올리면 진짜 문제가 묻힌다.
 	bool IsPeerClosedError(int errorCode)
@@ -136,23 +117,14 @@ void ClientSession::ResetSession()
 		m_recvPacketBuffer->Reset();
 	}
 
-	// 전송 중이던 패킷을 반환한다.
-	// 포인터만 버리면 패킷 메모리와 SendPacketBuffer 가 함께 누수된다.
+	// 전송 중이던 엔트리를 반환한다.
+	// 포인터만 버리면 패킷 메모리와 엔트리가 함께 누수된다.
 	// (RST 등으로 전송 도중에 세션이 정리되는 경로에서 실제로 발생한다)
-	if (m_currentSendPacket)
+	if (m_currentSendPacket && m_sendPacketQueue)
 	{
-		if (m_packetMemoryPool && m_generalMemoryPool)
-		{
-			ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket);
-		}
-
-		if (m_sendPacketPool)
-		{
-			m_sendPacketPool->Release(m_currentSendPacket);
-		}
-
-		m_currentSendPacket = nullptr;
+		m_sendPacketQueue->ReleaseEntry(m_currentSendPacket);
 	}
+	m_currentSendPacket = nullptr;
 	m_sendOffset = 0;
 
 	if (m_jobQueue)
@@ -194,26 +166,17 @@ void ClientSession::Finalize()
 
 	m_eventHandler = nullptr;
 
-	// 전송 중이던 패킷을 반환한다. (ResetSession 과 같은 이유)
-	// 반드시 ReleaseMemoryResources 보다 먼저 해야 한다. 그쪽이
-	// m_sendPacketPool 을 nullptr 로 만들기 때문이다.
-	if (m_currentSendPacket)
+	// 전송 중이던 엔트리를 반환한다. (ResetSession 과 같은 이유)
+	// 반드시 ReleaseMemoryResources 보다 먼저 해야 한다. 그쪽이 송신 큐를
+	// 지우고, 엔트리를 되돌릴 수 있는 것은 그 큐뿐이다.
+	if (m_currentSendPacket && m_sendPacketQueue)
 	{
-		if (m_packetMemoryPool && m_generalMemoryPool)
-		{
-			ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket);
-		}
-
-		if (m_sendPacketPool)
-		{
-			m_sendPacketPool->Release(m_currentSendPacket);
-		}
-
-		m_currentSendPacket = nullptr;
+		m_sendPacketQueue->ReleaseEntry(m_currentSendPacket);
 	}
+	m_currentSendPacket = nullptr;
 	m_sendOffset = 0;
 
-	// 송신 큐 / 잡 큐 / 수신 링 / 송신 풀 포인터.
+	// 송신 큐 / 잡 큐 / 수신 링.
 	// InitializeMemoryPool 의 실패 정리와 같은 코드를 쓴다.
 	ReleaseMemoryResources();
 
@@ -299,7 +262,7 @@ bool ClientSession::OnDisconnect()
 	return BaseSession::OnDisconnect();
 }
 
-bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig)
+bool ClientSession::InitializeMemoryPool(EngineMemoryPool* sendQueueMemoryPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig)
 {
 	if (!bufferConfig.IsValid())
 	{
@@ -311,9 +274,9 @@ bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketP
 
 	// 널 풀은 아무것도 잡기 전에 걸러낸다. 예전에는 이 검사가 세 번째
 	// 단계에 있어서, 실패가 확정된 뒤에 링 버퍼와 잡 큐를 만들었다 지웠다.
-	if (!hybridSendPacketPool)
+	if (!sendQueueMemoryPool)
 	{
-		ENGINE_VIOLATION("session %u received a null send packet pool", GetSessionID());
+		ENGINE_VIOLATION("session %u received a null send queue memory pool", GetSessionID());
 		return false;
 	}
 
@@ -345,16 +308,9 @@ bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketP
 		return false;
 	}
 
-	m_sendPacketPool = hybridSendPacketPool->GetPool(GetSessionID());
-	if (!m_sendPacketPool)
-	{
-		ReleaseMemoryResources();
-		return false;
-	}
-
 	m_sendPacketQueue = new SendPacketQueue();
 	if (!m_sendPacketQueue ||
-		!m_sendPacketQueue->Initialize(m_sendPacketPool, packetMemoryPool, generalMemoryPool, m_bufferConfig.sendQueueDepth))
+		!m_sendPacketQueue->Initialize(sendQueueMemoryPool, packetMemoryPool, generalMemoryPool, m_bufferConfig.sendQueueDepth))
 	{
 		ReleaseMemoryResources();
 		return false;
@@ -366,8 +322,7 @@ bool ClientSession::InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketP
 // InitializeMemoryPool 이 잡은 것만 되돌린다.
 // 실패 정리와 Finalize 가 같은 코드를 쓰게 하려고 뺐다.
 //
-// 순서는 Finalize 가 쓰던 것을 그대로 따른다. 송신 큐가 송신 풀을 참조하므로
-// 큐를 먼저 내리고 풀 포인터를 마지막에 놓는다.
+// 순서는 Finalize 가 쓰던 것을 그대로 따른다.
 //
 // 부분 생성 상태에서 불려도 안전하다. 세 자원의 Finalize/Reset 은 전부
 // 널 검사로 시작한다.
@@ -393,8 +348,6 @@ void ClientSession::ReleaseMemoryResources()
 		delete m_recvPacketBuffer;
 		m_recvPacketBuffer = nullptr;
 	}
-
-	m_sendPacketPool = nullptr;
 }
 
 bool ClientSession::IsReady() const
@@ -609,10 +562,8 @@ bool ClientSession::PostCurrentSend()
 
 	if (remainingBytes == 0)
 	{
-		// PacketData 반환
-		ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket);
-
-		m_sendPacketPool->Release(m_currentSendPacket);
+		// 패킷 + 엔트리 반환
+		m_sendPacketQueue->ReleaseEntry(m_currentSendPacket);
 		m_currentSendPacket = nullptr;
 		::InterlockedExchange(&m_sending, 0);
 
@@ -663,7 +614,7 @@ bool ClientSession::OnSendCompleted(const DWORD bytesTransferred)
 	// 부분 전송 처리
 	m_sendOffset += bytesTransferred;
 
-	SendPacketBuffer* currentPacket = m_currentSendPacket;
+	SendPacketEntry* currentPacket = m_currentSendPacket;
 	if (!currentPacket)
 	{
 		// 다른 경로(HandleSocketError 등)가 이미 패킷과 토큰을 정리한 상태다.
@@ -679,10 +630,8 @@ bool ClientSession::OnSendCompleted(const DWORD bytesTransferred)
 	}
 
 	// 완전 전송 완료
-	// PacketData 반환
-	ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, currentPacket);
-
-	m_sendPacketPool->Release(currentPacket);
+	// 패킷 + 엔트리 반환
+	m_sendPacketQueue->ReleaseEntry(currentPacket);
 	m_currentSendPacket = nullptr;
 
 	m_sendOffset = 0;
@@ -852,14 +801,13 @@ void ClientSession::HandleSocketError(int errorCode, IO_OPERATION ioOperation)
 	else if (ioOperation == IO_OPERATION::SEND)
 	{
 		// SEND 인 경우
-		// 현재 처리되어야 하는 패킷을 패킷풀에 반환하고
+		// 현재 처리되어야 하는 엔트리를 큐에 반환하고
 		// nullptr 초기화 한다.
-		if (m_currentSendPacket)
+		if (m_currentSendPacket && m_sendPacketQueue)
 		{
-			ReleaseSendPacketData(*m_packetMemoryPool, *m_generalMemoryPool, m_currentSendPacket);
-			m_sendPacketPool->Release(m_currentSendPacket);
-			m_currentSendPacket = nullptr;
+			m_sendPacketQueue->ReleaseEntry(m_currentSendPacket);
 		}
+		m_currentSendPacket = nullptr;
 
 		m_sendOffset = 0;
 		::InterlockedExchange(&m_sending, 0);

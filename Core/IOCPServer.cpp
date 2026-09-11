@@ -23,7 +23,7 @@
 #include "../Network/SocketOption.h"
 
 #include "../Buffer/RecvPacketBuffer.h"
-#include "../Buffer/HybridSendPacketPool.h"
+#include "../Buffer/SendPacketEntry.h"
 #include "../Buffer/PreDefine.h"
 #include "../Protocol/PacketID.h"
 
@@ -187,11 +187,20 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		return false;
 	}
 
-	m_hybridSendPacketPool = new HybridSendPacketPool();
-	if (!m_hybridSendPacketPool)
+	// 송신 큐 엔트리 풀. 빈은 하나면 된다 — 담는 것이 한 종류뿐이다.
+	EngineMemoryPool::SlabConfig configsSendQueue[] = {
+		{sizeof(SendPacketEntry), SEND_QUEUE_ENTRY_COUNT},
+	};
+
+	m_sendQueueMemoryPool = new EngineMemoryPool;
+	if (!m_sendQueueMemoryPool)
 		return false;
-	if (!m_hybridSendPacketPool->Initialize(HYBRID_SEND_PACKET_POOL_SIZE))
+
+	if (!m_sendQueueMemoryPool->Initialize(configsSendQueue, _countof(configsSendQueue)))
+	{
+		LOGE("failed to initialize the send queue memory pool");
 		return false;
+	}
 
 	m_readySessionQueue = new ReadySessionQueue;
 	if (!m_readySessionQueue)
@@ -245,7 +254,7 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 
 	LOGI("accept slots %u (max connections %u)", acceptSlotCount, maxConnectionCount);
 
-	if (!m_sessionManager->Initialize(acceptSlotCount, maxConnectionCount, m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, IOCPCore::CloseSocketHandle, bufferConfig))
+	if (!m_sessionManager->Initialize(acceptSlotCount, maxConnectionCount, m_sendQueueMemoryPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, IOCPCore::CloseSocketHandle, bufferConfig))
 		return false;
 
 	// 세션 종료 통지를 세션 풀에 맡긴다.
@@ -371,19 +380,23 @@ void IOCPServer::StopServer()
 		m_packetHandlerTable = nullptr;
 	}
 
-	if (m_hybridSendPacketPool)
-	{
-		m_hybridSendPacketPool->Finalize();
-		delete m_hybridSendPacketPool;
-		m_hybridSendPacketPool = nullptr;
-	}
-
 	// 풀 지표를 남긴다.
 	// peak 은 초기 blockCount 산정 근거이고, grow 가 0 이 아니면 초기값이 부족했다는 뜻이며
 	// OUTSTANDING 이 0 이 아니면 누수다. 개별 할당 로그 없이 이걸로 판단한다.
-	if (m_jobMemoryPool)     m_jobMemoryPool->LogStats("job");
-	if (m_packetMemoryPool)  m_packetMemoryPool->LogStats("packet");
-	if (m_generalMemoryPool) m_generalMemoryPool->LogStats("general");
+	//
+	// sendQueue 는 세션이 전부 내려간 뒤에 찍어야 한다 (세션 매니저를 이미
+	// 지웠으므로 그 조건은 만족한다). 여기서 grow 가 0 이 아니면 초기
+	// SEND_QUEUE_ENTRY_COUNT 로는 버스트를 못 받았다는 뜻이다.
+	if (m_jobMemoryPool)       m_jobMemoryPool->LogStats("job");
+	if (m_packetMemoryPool)    m_packetMemoryPool->LogStats("packet");
+	if (m_generalMemoryPool)   m_generalMemoryPool->LogStats("general");
+	if (m_sendQueueMemoryPool) m_sendQueueMemoryPool->LogStats("sendQueue");
+
+	if (m_sendQueueMemoryPool)
+	{
+		delete m_sendQueueMemoryPool;
+		m_sendQueueMemoryPool = nullptr;
+	}
 
 	if (m_jobMemoryPool)
 	{

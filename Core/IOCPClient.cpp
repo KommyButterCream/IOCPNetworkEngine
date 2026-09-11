@@ -19,7 +19,7 @@
 #include "../Memory/EngineMemoryPoolHelper.h"
 
 #include "../Buffer/RecvPacketBuffer.h"
-#include "../Buffer/HybridSendPacketPool.h"
+#include "../Buffer/SendPacketEntry.h"
 #include "../Buffer/PreDefine.h"
 #include "../Protocol/PacketID.h"
 #include "../Protocol/SystemPacket.h"
@@ -180,12 +180,23 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		return false;
 	}
 
-	// PacketSend 를 위한 패킷 버퍼 풀 생성(1개)
-	m_hybridSendPacketPool = new HybridSendPacketPool();
-	if (!m_hybridSendPacketPool)
+	// 송신 큐 엔트리 풀. 구성은 서버와 같다 (IOCPServer::StartServer 참고).
+	//
+	// 예전에는 같은 총량을 샤드 1개로 만들었다. 세션이 하나뿐이라 샤딩이
+	// 무의미했고, 그래도 총량만큼을 기동 시점에 전부 잡았다.
+	EngineMemoryPool::SlabConfig configsSendQueue[] = {
+		{sizeof(SendPacketEntry), SEND_QUEUE_ENTRY_COUNT},
+	};
+
+	m_sendQueueMemoryPool = new EngineMemoryPool;
+	if (!m_sendQueueMemoryPool)
 		return false;
-	if (!m_hybridSendPacketPool->Initialize(HYBRID_SEND_PACKET_POOL_SIZE, 1))
+
+	if (!m_sendQueueMemoryPool->Initialize(configsSendQueue, _countof(configsSendQueue)))
+	{
+		LOGE("failed to initialize the send queue memory pool");
 		return false;
+	}
 
 	m_handlerContext.jobMemoryPool = GetJobMemoryPool();
 	m_handlerContext.packetMemoryPool = GetPacketMemoryPool();
@@ -209,7 +220,7 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		LOGE("failed to initialize the client session");
 		return false;
 	}
-	if (!m_session->InitializeMemoryPool(m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, bufferConfig))
+	if (!m_session->InitializeMemoryPool(m_sendQueueMemoryPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, bufferConfig))
 		return false;
 	m_session->SetEventHandler(this);
 
@@ -308,11 +319,13 @@ void IOCPClient::StopClient()
 		m_packetMemoryPool = nullptr;
 	}
 
-	if (m_hybridSendPacketPool)
+	// 세션(m_session)을 이미 지웠으므로 엔트리는 모두 반납된 상태다.
+	if (m_sendQueueMemoryPool)
 	{
-		m_hybridSendPacketPool->Finalize();
-		delete m_hybridSendPacketPool;
-		m_hybridSendPacketPool = nullptr;
+		m_sendQueueMemoryPool->LogStats("sendQueue");
+
+		delete m_sendQueueMemoryPool;
+		m_sendQueueMemoryPool = nullptr;
 	}
 
 	if (m_packetHandlerTable)

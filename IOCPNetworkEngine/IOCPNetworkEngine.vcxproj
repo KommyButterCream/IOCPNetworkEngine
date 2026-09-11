@@ -19,9 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\Buffer\HybridSendPacketPool.cpp" />
     <ClCompile Include="..\Buffer\RecvPacketBuffer.cpp" />
-    <ClCompile Include="..\Buffer\SendPacketPool.cpp" />
     <ClCompile Include="..\Buffer\SendPacketQueue.cpp" />
     <ClCompile Include="..\Core\HeartbeatThread.cpp" />
     <ClCompile Include="..\Core\IOCPClient.cpp" />
@@ -46,10 +44,9 @@
     <ClCompile Include="..\Session\SessionManager.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\Buffer\HybridSendPacketPool.h" />
     <ClInclude Include="..\Buffer\PreDefine.h" />
     <ClInclude Include="..\Buffer\RecvPacketBuffer.h" />
-    <ClInclude Include="..\Buffer\SendPacketPool.h" />
+    <ClInclude Include="..\Buffer\SendPacketEntry.h" />
     <ClInclude Include="..\Buffer\SendPacketQueue.h" />
     <ClInclude Include="..\Core\HeartbeatThread.h" />
     <ClInclude Include="..\Core\IOCPClient.h" />

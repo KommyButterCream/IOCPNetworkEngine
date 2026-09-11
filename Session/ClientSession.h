@@ -9,17 +9,14 @@
 
 #include "../Network/OverlappedEx.h"
 #include "../Protocol/PacketID.h"
-#include "../Buffer/SendPacketPool.h"
+#include "../Buffer/SendPacketEntry.h"
 #include "../Buffer/SessionBufferConfig.h"
 
 struct Job;
-struct SendPacketBuffer;
 
 class SessionJobQueue;
 class RecvPacketBuffer;
 class SendPacketQueue;
-class SendPacketPool;
-class HybridSendPacketPool;
 #include "../Memory/EngineMemoryPoolFwd.h"
 class ISessionEvent;
 
@@ -57,8 +54,14 @@ private:
 
 	OverlappedEx m_sendOverlapped{};
 	SendPacketQueue* m_sendPacketQueue = nullptr;
-	SendPacketPool* m_sendPacketPool = nullptr;
-	SendPacketBuffer* m_currentSendPacket = nullptr;
+
+	// 큐에서 꺼내 전송 중인 엔트리. 큐 밖에 있는 유일한 엔트리이고,
+	// 다 쓰면 m_sendPacketQueue->ReleaseEntry 로 되돌린다.
+	//
+	// 예전에는 전용 서술자 풀 포인터(m_sendPacketPool)를 따로 들고 있었다.
+	// 패킷 반납과 서술자 반납을 세션이 각각 불러야 했기 때문이다. 반납을
+	// 큐 한 곳으로 모으면서 그 멤버가 필요 없어졌다.
+	SendPacketEntry* m_currentSendPacket = nullptr;
 	Job* m_currentJob = nullptr;
 	uint32_t m_sendOffset = 0;
 	SessionJobQueue* m_jobQueue = nullptr;
@@ -95,7 +98,7 @@ public:
 
 	// ClientSession 전용 메서드
 public:
-	bool InitializeMemoryPool(HybridSendPacketPool* hybridSendPacketPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig);
+	bool InitializeMemoryPool(EngineMemoryPool* sendQueueMemoryPool, EngineMemoryPool* jobMemoryPool, EngineMemoryPool* packetMemoryPool, EngineMemoryPool* generalMemoryPool, const SessionBufferConfig& bufferConfig);
 
 	bool IsReady() const;
 	// 두 단계다. IsTransportConnected 는 소켓이 붙었는가,

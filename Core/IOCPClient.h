@@ -15,7 +15,6 @@ struct OverlappedEx;
 class ISession;
 class BaseSession;
 class ClientSession;
-class HybridSendPacketPool;
 #include "../Memory/EngineMemoryPoolFwd.h"
 class ClientSessionScheduler;
 class PacketHandlerTable;
@@ -75,10 +74,12 @@ private:
 
 	ClientSession* m_session = nullptr;
 
-	HybridSendPacketPool* m_hybridSendPacketPool = nullptr;
 	EngineMemoryPool* m_jobMemoryPool = nullptr;
 	EngineMemoryPool* m_packetMemoryPool = nullptr;
 	EngineMemoryPool* m_generalMemoryPool = nullptr;
+
+	// 송신 큐 엔트리 전용 풀. 분리 이유는 IOCPServer 의 같은 멤버 주석 참고.
+	EngineMemoryPool* m_sendQueueMemoryPool = nullptr;
 	ClientSessionScheduler* m_clientSessionScheduler = nullptr;
 	PacketHandlerTable* m_packetHandlerTable = nullptr;
 	HandlerContext m_handlerContext = {};

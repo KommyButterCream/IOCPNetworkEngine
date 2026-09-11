@@ -12,7 +12,6 @@ enum class IO_OPERATION;
 
 class ISession;
 class ClientSession;
-class HybridSendPacketPool;
 class AcceptSession;
 class PacketHandlerTable;
 class SessionManager;
@@ -45,7 +44,6 @@ private:
 	SOCKET m_serverSocket = INVALID_SOCKET;
 
 	SessionManager* m_sessionManager = nullptr;
-	HybridSendPacketPool* m_hybridSendPacketPool = nullptr;
 	ReadySessionQueue* m_readySessionQueue = nullptr;
 	ReadySessionScheduler* m_readySessionScheduler = nullptr;
 	HeartbeatThread* m_heartbeatThread = nullptr;
@@ -53,6 +51,16 @@ private:
 	EngineMemoryPool* m_jobMemoryPool = nullptr;
 	EngineMemoryPool* m_packetMemoryPool = nullptr;
 	EngineMemoryPool* m_generalMemoryPool = nullptr;
+
+	// 송신 큐 엔트리 전용 풀.
+	//
+	// m_packetMemoryPool 안의 빈 하나로 대신하지 않는 이유는, 그 풀이 수신
+	// 경로도 쓰기 때문이다(RecvPacketBuffer::ReadPacket). 같이 쓰면 송신
+	// 버스트가 수신 실패로 번진다. 따로 두면 LogStats("sendQueue") 의
+	// grow / acquireFail 이 송신 경로만의 신호가 되는 이점도 있다.
+	//
+	// 예전에는 HybridSendPacketPool 이 이 자리에 있었다.
+	EngineMemoryPool* m_sendQueueMemoryPool = nullptr;
 
 	HandlerContext m_handlerContext = {};
 

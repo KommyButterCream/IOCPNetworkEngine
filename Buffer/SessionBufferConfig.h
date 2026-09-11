@@ -37,9 +37,16 @@ struct SessionBufferConfig
 	// 그래서 보내는 시점에 여기서 막아 호출부에 알린다.
 	uint32_t maxSendPacketSize = PACKET_SIZE_LIMIT;
 
-	// 세션당 송신 큐 깊이. 2의 거듭제곱.
+	// 세션당 송신 큐 깊이 = 동시에 담아 둘 수 있는 패킷 수의 상한.
 	//
-	// 포인터 배열이라 깊이 x 8바이트를 세션마다 잡는다. 4096 이면 32KB.
+	// 2의 거듭제곱이 아니어도 된다. 예전에는 큐가 고정 크기 링이라 위치를
+	// 마스크로 계산했고 그래서 거듭제곱을 요구했다. 지금은 엔트리를
+	// 연결 리스트로 엮으므로 이 값은 개수 상한으로만 쓰인다.
+	//
+	// 세션마다 미리 잡는 메모리도 없다. 예전에는 깊이 x 8바이트짜리 포인터
+	// 배열을 기동 시점에 전부 잡았고(4096 이면 32KB) 한 칸도 쓰지 않는
+	// 세션이 같은 값을 냈다. 이제는 실제로 담긴 만큼만 엔트리 풀에서 나온다.
+	//
 	// 깊을수록 느린 피어의 버스트를 더 흡수하지만, 그만큼 오래된 데이터를
 	// 붙들고 있게 된다. 실시간성이 중요하면 얕게 잡는 편이 낫다.
 	uint32_t sendQueueDepth = BLOCK_COUNT_4K;
@@ -59,7 +66,9 @@ struct SessionBufferConfig
 		if (recvRingSize < maxRecvPacketSize * 2)
 			return false;
 
-		if (!IsPowerOfTwo(sendQueueDepth))
+		// 거듭제곱 제약은 없다. 0 만 막는다 — 한 칸도 못 담는 큐는
+		// 아무것도 보낼 수 없는 세션과 같다.
+		if (sendQueueDepth == 0)
 			return false;
 
 		return true;
