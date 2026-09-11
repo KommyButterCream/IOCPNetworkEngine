@@ -491,7 +491,17 @@ bool ClientSession::PostReceive()
 
 	m_lastRecvBufferFullTime = 0;
 
-	IncrementIO();
+	// 취소가 걸린 뒤에는 새 수신을 걸지 않는다. (사정은 BaseSession::BeginIO 주석)
+	//
+	// 아이디를 미리 읽어 둔다. BeginIO 가 false 를 돌려주면 그 안의 되돌림이
+	// 마지막 카운트였을 수 있고, 그러면 이 세션은 이미 풀로 돌아가 있다.
+	const uint32_t sessionIdForLog = GetSessionID();
+
+	if (!BeginIO())
+	{
+		LOGI("session %u declining to post recv : IO cancel is in progress", sessionIdForLog);
+		return false;
+	}
 
 	int result = ::WSARecv(
 		GetClientSocket(),
@@ -593,7 +603,37 @@ bool ClientSession::PostCurrentSend()
 	DWORD flags = 0;
 	DWORD bytesSent = 0;
 
-	IncrementIO();
+	// 취소가 걸린 뒤에는 새 송신을 걸지 않는다. (사정은 BaseSession::BeginIO 주석)
+	//
+	// 정리를 BeginIO 앞에서 끝내는 것이 중요하다. 카운트를 들고 있는 동안은
+	// 세션이 반납되지 않으므로 여기서 엔트리를 되돌리는 것이 안전하고,
+	// BeginIO 가 false 를 돌려준 뒤에는 세션을 만질 수 없다.
+	//
+	// 엔트리를 되돌리지 않으면 패킷과 엔트리가 그대로 새고, m_sending
+	// 토큰이 잡힌 채로 남아 이 세션은 이후 어떤 송신도 발행하지 못한다.
+	const uint32_t sessionIdForLog = GetSessionID();
+
+	if (IsIOCancelRequested())
+	{
+		LOGI("session %u declining to post send : IO cancel is in progress", sessionIdForLog);
+
+		m_sendPacketQueue->ReleaseEntry(m_currentSendPacket);
+		m_currentSendPacket = nullptr;
+		m_sendOffset = 0;
+		::InterlockedExchange(&m_sending, 0);
+
+		return false;
+	}
+
+	if (!BeginIO())
+	{
+		// 위 검사와 여기 사이에 취소가 걸렸다. 정리는 카운트를 들고 있는
+		// BeginIO 안에서 할 수 없으므로, 발행만 포기하고 엔트리는 그대로 둔다.
+		// 세션 반납 경로(ResetSession / Finalize)가 m_currentSendPacket 을
+		// 회수한다.
+		LOGI("session %u declining to post send : IO cancel raced the post", sessionIdForLog);
+		return false;
+	}
 
 	int result = ::WSASend(
 		GetClientSocket(),

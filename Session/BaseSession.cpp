@@ -293,6 +293,17 @@ bool BaseSession::CancelPendingIO()
 	return true;
 }
 
+void BaseSession::ReissueCancelIo()
+{
+	if (m_clientSocket == INVALID_SOCKET)
+		return;
+
+	// 실패는 정상이다. 취소할 것이 없으면 ERROR_NOT_FOUND 가 돌아오고,
+	// 그건 낙오가 없었다는 뜻이다. 여기서는 보고하지 않는다 —
+	// 판정은 아래 대기가 카운트로 한다.
+	::CancelIoEx(reinterpret_cast<HANDLE>(m_clientSocket), nullptr);
+}
+
 bool BaseSession::WaitForIOCancelComplete(const uint32_t timeout_ms)
 {
 	// 기다리는 목적은 "미완료 I/O 가 없는 상태" 하나다. 이벤트는 그걸
@@ -303,42 +314,99 @@ bool BaseSession::WaitForIOCancelComplete(const uint32_t timeout_ms)
 		return true;
 	}
 
-	if (m_ioCancelCompleteEvent)
+	if (!m_ioCancelCompleteEvent)
 	{
-		DWORD waitResult = ::WaitForSingleObject(m_ioCancelCompleteEvent, timeout_ms);
+		return true;
+	}
 
-		switch (waitResult)
+	// 한 번에 통째로 기다리지 않고 쪼개서 기다린다.
+	//
+	// 예전에는 여기서 timeout_ms 를 한 번에 걸었다. 그러면 게이트를 막
+	// 통과한 스레드가 취소 뒤에 발행한 I/O 를 아무도 다시 취소하지 않으므로,
+	// 그 한 건 때문에 10초를 통째로 태우고 타임아웃했다.
+	// (실측: bench Phase 4 반복 8회 전부)
+	//
+	// 슬라이스마다 CancelIoEx 를 다시 건다. 게이트가 닫힌 뒤로는 새 I/O 가
+	// 생기지 않으므로 낙오는 유한하고, 보통 두 번째 취소에서 걷힌다.
+	constexpr DWORD CANCEL_RETRY_SLICE_MS = 50;
+
+	const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+
+	for (;;)
+	{
+		const ULONGLONG now = ::GetTickCount64();
+		const DWORD remaining = (now >= deadline)
+			? 0
+			: static_cast<DWORD>(deadline - now);
+
+		if (remaining == 0)
+			break;
+
+		const DWORD slice = (remaining < CANCEL_RETRY_SLICE_MS) ? remaining : CANCEL_RETRY_SLICE_MS;
+
+		const DWORD waitResult = ::WaitForSingleObject(m_ioCancelCompleteEvent, slice);
+
+		if (waitResult == WAIT_OBJECT_0)
 		{
-		case WAIT_OBJECT_0:
 			LOGI("session %u IO cancel completed", GetSessionID());
 			return true;
-
-		case WAIT_TIMEOUT:
-		{
-			// 신호를 놓쳤을 수도 있으니 목적을 한 번 더 직접 확인한다.
-			const LONG outstanding = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
-
-			if (outstanding == 0)
-			{
-				LOGW("session %u IO cancel event was missed but the count is zero", GetSessionID());
-				return true;
-			}
-
-			// 호출부는 이 실패를 무시하고 세션 해제로 진행하므로
-			// 남아 있는 IO 수까지 남겨야 원인 추적이 가능하다.
-			LOGE("session %u IO cancel timed out after %u ms (io count still %ld)",
-				GetSessionID(), timeout_ms, outstanding);
-			return false;
 		}
 
-		default:
+		if (waitResult != WAIT_TIMEOUT)
+		{
 			LOGE("session %u IO cancel wait returned %lu (error %lu)",
 				GetSessionID(), waitResult, ::GetLastError());
 			return false;
 		}
+
+		// 신호를 놓쳤을 수도 있으니 목적을 직접 확인한다.
+		if (::InterlockedCompareExchange(&m_ioCount, 0, 0) == 0)
+		{
+			LOGW("session %u IO cancel event was missed but the count is zero", GetSessionID());
+			return true;
+		}
+
+		// 낙오가 있으면 여기서 걷힌다.
+		ReissueCancelIo();
 	}
 
-	return true;
+	const LONG outstanding = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
+
+	if (outstanding == 0)
+	{
+		LOGW("session %u IO cancel event was missed but the count is zero", GetSessionID());
+		return true;
+	}
+
+	// 호출부는 이 실패를 무시하고 세션 해제로 진행하므로
+	// 남아 있는 IO 수까지 남겨야 원인 추적이 가능하다.
+	LOGE("session %u IO cancel timed out after %u ms (io count still %ld)",
+		GetSessionID(), timeout_ms, outstanding);
+	return false;
+}
+
+bool BaseSession::IsIOCancelRequested() const
+{
+	return (::InterlockedCompareExchange(
+		const_cast<volatile LONG*>(&m_cancelIo), 0, 0) == 1);
+}
+
+bool BaseSession::BeginIO()
+{
+	// 증가가 먼저다. 이유는 헤더 주석 참고 —
+	// 이 카운트가 곧 "대기가 통과하지 못하게 하는 장벽" 이다.
+	::InterlockedIncrement(&m_ioCount);
+
+	if (::InterlockedCompareExchange(&m_cancelIo, 0, 0) == 0)
+	{
+		return true;
+	}
+
+	// 취소가 이미 걸려 있다. 발행하지 않고 카운트를 되돌린다.
+	// 이 감소가 마지막이면 여기서 완료 이벤트가 서고 예약된 반납이 끝난다.
+	DecrementIO();
+
+	return false;
 }
 
 bool BaseSession::OnDisconnect()
