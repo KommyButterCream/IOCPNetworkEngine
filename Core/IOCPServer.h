@@ -12,9 +12,9 @@ enum class IO_OPERATION;
 
 class ISession;
 class ClientSession;
+class HybridSendPacketPool;
 class AcceptSession;
 class PacketHandlerTable;
-class HybridSendPacketPool;
 class SessionManager;
 class ReadySessionQueue;
 class ReadySessionScheduler;
@@ -115,6 +115,12 @@ private:
 	void HandleSocketError(OverlappedEx* overlappedEx, ClientSession* session, int errorCode, IO_OPERATION ioOperation);
 
 	void HandleAccept(uint32_t sessionId, DWORD bytesTransferred);
+
+	// 수락한 소켓에 옵션을 걸고 IOCP 에 등록해 수신을 시작한다.
+	// 실패를 반환값 하나로 모으려고 떼어냈다. 예전에는 실패 지점마다
+	// ReleaseClientSession 이 붙어 있었는데, 그러면 반납 시점이 여러
+	// 갈래로 흩어져 "세션을 붙잡고 있는 구간" 을 만들 수 없다.
+	bool RunAcceptedConnectSequence(ClientSession* clientSession);
 	void HandleAcceptIOCancelled(uint32_t sessionId);
 	void HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred);
 	void HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* session);
@@ -135,6 +141,10 @@ private:
 	bool PrepareAccept();
 	bool PrepareAccept(uint32_t sessionId);
 	bool PostAccept(AcceptSession* acceptSession);
+
+	// ClientSessionPool 이 세션을 실제로 반납할 때 부르는 진입점.
+	// 여기서 서비스의 OnClientDisconnect 로 넘긴다.
+	static void OnSessionDisconnectNotify(void* context, ClientSession* session);
 
 	// 걸기가 실패해 비어 버린 슬롯을 다시 채운다.
 	//
@@ -172,6 +182,20 @@ public:
 	// 0 이면 새 접속을 전혀 받지 못하는 상태다.
 	uint32_t GetPostedAcceptCount() const;
 	uint32_t GetDesiredAcceptCount() const;
+
+	// 지금 이 서버의 세션들이 들고 있는 미완료 I/O 총합.
+	//
+	// 이 값이 0 이라는 것은 어떤 스레드도 완료 핸들러 안에서 세션을
+	// 만지고 있지 않다는 뜻이고, 엔진의 수명 규약 전체가 이 하나에
+	// 얹혀 있다. 조용한 상태에서 0 으로 돌아오지 않으면 Increment 와
+	// Decrement 의 짝이 맞지 않는다는 신호다.
+	uint32_t GetOutstandingIOCount() const;
+
+	// 지금 임대되어 있는 클라이언트 세션 수. 운영 지표이자, 반납이
+	// 실제로 이루어졌는지 확인하는 유일한 외부 관측점이다.
+	// 미완료 I/O 가 0 이어도 세션이 풀로 돌아오지 않았을 수 있다 —
+	// 그 둘은 별개의 실패다.
+	uint32_t GetInUseSessionCount() const;
 
 protected:
 	EngineMemoryPool* GetJobMemoryPool() const;

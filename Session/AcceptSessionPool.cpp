@@ -103,6 +103,26 @@ uint32_t AcceptSessionPool::GetSessionCount() const
 	return m_capacity;
 }
 
+uint32_t AcceptSessionPool::GetOutstandingIOCount() const
+{
+	if (!m_sessions)
+		return 0;
+
+	uint32_t total = 0;
+
+	for (uint32_t i = 0; i < m_capacity; ++i)
+	{
+		const LONG outstanding = m_sessions[i].GetOutstandingIOCount();
+
+		// 음수는 짝이 맞지 않는다는 뜻이고 이미 위반으로 잡힌다.
+		// 여기서 더해 상쇄시키면 합계가 0 으로 보여 오히려 숨는다.
+		if (outstanding > 0)
+			total += static_cast<uint32_t>(outstanding);
+	}
+
+	return total;
+}
+
 void AcceptSessionPool::RequestAllAcceptIOCancel()
 {
 	if (!m_sessions)

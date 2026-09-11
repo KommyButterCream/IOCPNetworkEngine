@@ -34,6 +34,29 @@
 
 using namespace Core::Util;
 
+namespace
+{
+	// 연결이 죽어서 난 I/O 실패인가. (IOCPServer.cpp 의 같은 이름 참고)
+	//
+	// ERROR_OPERATION_ABORTED 는 여기 없다. 그건 우리가 건 취소이고,
+	// 취소를 건 쪽이 이미 종료 절차를 밟고 있다.
+	bool IsConnectionDeadError(int errorCode)
+	{
+		switch (errorCode)
+		{
+		case WSAECONNRESET:           // 상대가 강제 종료 (RST)
+		case WSAECONNABORTED:         // 연결 중단
+		case WSAENOTCONN:             // 이미 끊김
+		case WSAESHUTDOWN:            // 송수신 불가
+		case ERROR_NETNAME_DELETED:   // 네트워크 이름 삭제 = 연결 끊김
+		case ERROR_CONNECTION_ABORTED:
+			return true;
+		default:
+			return false;
+		}
+	}
+}
+
 IOCPClient::IOCPClient()
 {
 }
@@ -45,6 +68,10 @@ IOCPClient::~IOCPClient()
 
 bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const SessionBufferConfig& bufferConfig)
 {
+	// 종료 게이트를 초기화한다. 객체 재사용을 지원하지는 않지만(m_destroyFlag 가
+	// 되돌아가지 않는다) 플래그가 의미를 잃은 채 남아 있지 않게 한다.
+	::InterlockedExchange(&m_disconnecting, 0);
+
 	// 설정 오류는 아무것도 잡기 전에 걸러낸다.
 	if (!bufferConfig.IsValid())
 	{
@@ -57,13 +84,19 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 	strcpy_s(m_serverIPAddress, sizeof(m_serverIPAddress), serverIp);
 	m_serverPort = port;
 
-	// 워커가 1개면 완료 핸들러 안에서 블로킹하는 순간 데드락이 된다.
-	// 엔진의 disconnect 경로(OnDisconnectRequest)는 CancelPendingIO 후
-	// WaitForIOCancelComplete 로 최대 10초를 기다리는데, 그 대기를 풀어 줄
-	// 취소 완료 통지를 처리할 스레드가 바로 그 블로킹된 워커 자신이다.
-	// 최소 2개를 두어 한 워커가 대기 중이어도 다른 워커가 완료를 처리하게 한다.
+	// 워커 2개.
 	//
-	// 근본 해결은 disconnect 를 동기 대기 없이 refcount 기반으로 지연 처리하는 것이다.
+	// 예전에는 이 숫자가 데드락 회피책이었다. disconnect 경로가 완료 핸들러
+	// 안에서 WaitForIOCancelComplete 로 최대 10초를 기다렸고, 그 대기를 풀어
+	// 줄 취소 완료 통지를 처리할 스레드가 바로 그 막힌 워커 자신이었다.
+	// 워커가 1개면 확정 데드락, 2개면 "둘 다 대기에 들어가지만 않으면" 이라는
+	// 조건부 회피였다. 실제로는 둘 다 들어가는 일이 잦아서 실행당 200회 넘게
+	// 10초 타임아웃을 태웠다.
+	//
+	// 이제 그 대기가 없다. disconnect 는 예약만 하고, 마지막 완료가 마무리한다.
+	// 2개를 유지하는 이유는 다른 것이다 — 서비스 콜백(OnReceive 등)이 워커
+	// 스레드에서 실행되므로, 하나가 서비스 코드에 붙들려 있어도 나머지 하나가
+	// 완료 통지를 계속 꺼낼 수 있어야 한다.
 	SetIOCPThreadCount(2);
 
 	if (!IOCPCore::Start())
@@ -180,6 +213,9 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		return false;
 	m_session->SetEventHandler(this);
 
+	// 마지막 완료가 종료 절차를 마무리할 수 있도록 진입점을 걸어 둔다.
+	m_session->SetReleaseReadyFunc(&IOCPClient::OnReleaseReady, this);
+
 	// 세션에 소켓 설정
 	m_session->SetClientSocket(m_clientSocket);
 
@@ -223,6 +259,23 @@ void IOCPClient::StopClient()
 	if (m_session)
 	{
 		OnDisconnectRequest(m_session);
+
+		// 기다리는 자리는 여기 하나로 남겼다.
+		//
+		// OnDisconnectRequest 는 이제 예약만 하고 즉시 돌아온다. 완료
+		// 핸들러 안에서 불릴 때 자기를 기다리지 않게 하려는 것이었고,
+		// 그 대신 누군가는 실제로 끝나기를 기다려야 한다. 그 자리가
+		// 여기다 — 이 함수는 앱 스레드에서 불리므로 자기 대기가 생기지
+		// 않고, 바로 아래 IOCPCore::Stop() 이후에는 남은 취소 완료 통지를
+		// 꺼내 줄 워커가 없다.
+		//
+		// 이벤트는 disconnect 를 요청한 쪽이 CancelPendingIO 로 무장해
+		// 두었으므로, 이미 다른 스레드가 절차를 진행 중이어도 세워진다.
+		if (!m_session->WaitForIOCancelComplete(10'000))
+		{
+			ENGINE_VIOLATION("session %u IO cancel did not complete during shutdown (io count %ld)",
+				m_session->GetSessionID(), m_session->GetOutstandingIOCount());
+		}
 	}
 
 	// [2] IOCP 정지. GQCS 워커 스레드를 조인한다.
@@ -351,51 +404,50 @@ void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* se
 	}
 	else if (ioOperation == IO_OPERATION::RECV)
 	{
-		switch (errorCode)
+		if (errorCode == ERROR_OPERATION_ABORTED)
 		{
-		case WSAECONNRESET:       // 연결이 비정상 종료됨 (상대방 강제 종료)
-		case WSAECONNABORTED:     // 연결 중단됨
-		case WSAENOTCONN:         // 연결이 이미 끊김
-		case WSAESHUTDOWN:        // 소켓 송수신 불가
-		case ERROR_NETNAME_DELETED: // 네트워크 이름 삭제됨 (연결 끊김)
-		case ERROR_CONNECTION_ABORTED:
-			// 서버와의 연결이 끊긴 상황
+			// 우리가 건 취소다. 취소를 건 쪽이 종료 절차를 이미 밟고 있다.
 			HandleRecvCancelled(overlappedEx, session);
-			break;
-		case ERROR_OPERATION_ABORTED:
-			HandleRecvCancelled(overlappedEx, session);
-			break;
-		default:
-			// 분류되지 않은 에러 코드. 빠져나가면 IO 카운트가 누출되므로
-			// 취소 처리로 보내 카운트를 정리한다.
-			ENGINE_VIOLATION("session %u unhandled recv error %d, treating it as a cancellation", session->GetSessionID(), errorCode);
-			HandleRecvCancelled(overlappedEx, session);
-			break;
+			return;
 		}
+
+		if (!IsConnectionDeadError(errorCode))
+		{
+			ENGINE_VIOLATION("session %u unhandled recv error %d, treating the connection as dead",
+				session->GetSessionID(), errorCode);
+		}
+
+		// 서버와의 연결이 죽었다. 취소와 다르다 — 아무도 정리하고 있지 않다.
+		//
+		// 예전에는 여기도 HandleRecvCancelled 로만 보냈다. 그 함수는 IO
+		// 카운트만 내린다. 그래서 클라이언트는 걸린 수신 없이 연결된 것처럼
+		// 남아, 아무것도 받지 못한 채 조용히 멈췄다. 서버 쪽과 같은 결함이다.
+		//
+		// 종료를 먼저 요청하고 카운트는 마지막에 내린다.
+		OnDisconnectRequest(session);
+
+		HandleRecvCancelled(overlappedEx, session);
 
 		return;
 	}
 	else if (ioOperation == IO_OPERATION::SEND)
 	{
-		switch (errorCode)
+		if (errorCode == ERROR_OPERATION_ABORTED)
 		{
-		case WSAECONNRESET:       // 연결이 비정상 종료됨 (상대방 강제 종료)
-		case WSAECONNABORTED:     // 연결 중단됨
-		case WSAENOTCONN:         // 연결이 이미 끊김
-		case WSAESHUTDOWN:        // 소켓 송수신 불가
-		case ERROR_NETNAME_DELETED: // 네트워크 이름 삭제됨 (연결 끊김)
 			HandleSendCancelled(overlappedEx, session);
-			break;
-		case ERROR_OPERATION_ABORTED:
-			HandleSendCancelled(overlappedEx, session);
-			break;
-		default:
-			// 분류되지 않은 에러 코드. 빠져나가면 IO 카운트가 누출되므로
-			// 취소 처리로 보내 카운트를 정리한다.
-			ENGINE_VIOLATION("session %u unhandled send error %d, treating it as a cancellation", session->GetSessionID(), errorCode);
-			HandleSendCancelled(overlappedEx, session);
-			break;
+			return;
 		}
+
+		if (!IsConnectionDeadError(errorCode))
+		{
+			ENGINE_VIOLATION("session %u unhandled send error %d, treating the connection as dead",
+				session->GetSessionID(), errorCode);
+		}
+
+		// 송신이 죽은 연결도 마찬가지다. 수신 쪽 주석 참고.
+		OnDisconnectRequest(session);
+
+		HandleSendCancelled(overlappedEx, session);
 
 		return;
 	}
@@ -410,43 +462,62 @@ void IOCPClient::HandleConnect(uint32_t sessionId, DWORD bytesTransferred)
 {
 	ENGINE_CHECK_RETVOID(m_session != nullptr, "connect completion arrived but there is no session");
 
-	// ConnectEx 에 대한 IO 카운트를 먼저 내려놓는다.
+	// ConnectEx 몫의 카운트는 이 함수 끝에서 내린다.
 	//
-	// 이전에는 SetClientContext / SetNoDelay 가 실패하면 DecrementIO 없이
-	// 그대로 return 했다. 그러면 카운트가 1 에 머물러 이 세션은 이후
-	// WaitForIOCancelComplete 에서 영구히 풀리지 않는다(10초 타임아웃 후 단정).
-	// 실패 여부와 무관하게 완료 통지 1건은 소비했으므로 여기서 내린다.
-	m_session->DecrementIO();
+	// 예전에는 여기 맨 앞에서 내렸다. 그때는 그게 옳았다 — 아래의
+	// OnDisconnectRequest 가 카운트 0 을 기다렸으므로, 우리 몫을 먼저
+	// 내려놓지 않으면 자기를 기다리는 꼴이 됐다.
+	//
+	// 이제 기다리지 않는다. 그래서 반대가 됐다. 여기서 먼저 내리면
+	// 카운트가 0 이 되어 실패 경로의 disconnect 가 그 자리에서 소켓을
+	// 닫아 버리고, 그 뒤 남은 코드가 닫힌 소켓을 쓴다.
+	//
+	// 실패 여부와 무관하게 완료 통지 1건은 소비했으므로 반드시 내린다.
+	// 그 자리가 이 함수의 마지막 줄이 됐을 뿐이다.
+	const bool connectSequenceOk = RunClientConnectSequence();
 
+	if (!connectSequenceOk)
+	{
+		OnDisconnectRequest(m_session);
+	}
+
+	// 이 함수의 마지막 줄이어야 한다. 여기서 지연된 disconnect 마무리가
+	// 실행될 수 있으므로 이후로 m_session 을 만지면 안 된다.
+	m_session->DecrementIO();
+}
+
+bool IOCPClient::RunClientConnectSequence()
+{
 	if (!SocketOption::SetClientContext(m_clientSocket))
 	{
 		LOGE("session %u SO_UPDATE_CONNECT_CONTEXT failed, dropping the connection", m_session->GetSessionID());
-		OnDisconnectRequest(m_session);
-		return;
+		return false;
 	}
 
 	if (!SocketOption::SetNoDelay(m_clientSocket))
 	{
 		LOGE("session %u TCP_NODELAY failed, dropping the connection", m_session->GetSessionID());
-		OnDisconnectRequest(m_session);
-		return;
+		return false;
 	}
 
 	if (!m_session->OnConnect())
 	{
 		LOGE("session %u OnConnect failed, dropping the connection", m_session->GetSessionID());
-		OnDisconnectRequest(m_session);
-		return;
+		return false;
 	}
 
 	if (!SendSystemAuthRequest(m_session))
 	{
 		LOGE("session %u system auth request send failed", m_session->GetSessionID());
-		OnDisconnectRequest(m_session);
-		return;
+		return false;
 	}
 
+	// 표시를 먼저. 이유는 서버 쪽 RunAcceptedConnectSequence 와 같다.
+	m_session->MarkServiceConnectNotified();
+
 	OnClientConnect(m_session);
+
+	return true;
 }
 
 void IOCPClient::HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSession* clientSession)
@@ -460,11 +531,23 @@ void IOCPClient::HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSessio
 	}
 
 	clientSession->SetClientSessionState(ClientSessionState::CONNECT_ABORTED);
-	clientSession->DecrementIO(); // 접속 실패 했으니 ConnectEx 에 대한 IO 1개 감소
 
-	OnClientDisconnect(clientSession);
+	// 여기서 OnClientDisconnect 를 부르지 않는다.
+	//
+	// 접속이 성립한 적이 없으므로 OnClientConnect 도 부른 적이 없다.
+	// 짝 없는 종료 통지는 서비스 쪽에서 "접속당 하나" 를 세는 코드를
+	// 어긋나게 한다. 접속 실패를 알리고 싶다면 그건 종료가 아니라
+	// 별도의 신호여야 한다.
+	//
+	// 통지가 필요한 경우라면 아래 OnDisconnectRequest 가 부르는
+	// CompleteDisconnect 가 래치를 보고 판단한다.
 
+	// disconnect 를 먼저 요청하고, ConnectEx 몫의 카운트는 마지막에 내린다.
+	// 순서를 바꾸면 카운트가 0 이 된 사이에 disconnect 가 소켓을 닫고,
+	// 그 뒤 이 함수가 세션을 계속 만지게 된다.
 	OnDisconnectRequest(clientSession);
+
+	clientSession->DecrementIO();
 }
 
 void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
@@ -482,9 +565,14 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		const DWORD error = ::GetLastError();
 		const int nError = ::WSAGetLastError();
 
-		session->DecrementIO(); // 접속 실패 했으니 ConnectEx 에 대한 IO 1개 감소
-
+		// disconnect 를 먼저 요청하고 카운트를 마지막에 내린다.
+		// HandleSessionDisconnected 가 OnDisconnectRequest 를 부르는데,
+		// 그보다 먼저 카운트를 0 으로 만들면 그 자리에서 소켓이 닫히고
+		// 세션 정리가 끝나 버린다.
 		HandleSessionDisconnected(overlappedEx, session, bytesTransferred);
+
+		// 이 분기의 마지막 줄이어야 한다.
+		session->DecrementIO();
 
 		return;
 	}
@@ -575,7 +663,9 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		OnReceive(clientSession, packetId, packetDataByMemoryPool, packetSize);
 	}
 
-	if (!disconnectAfterHandling)
+	// 처리 도중 종료가 예약됐으면 다음 수신을 걸지 않는다.
+	// (이유는 서버 쪽 HandleRecv 의 같은 자리 주석 참고)
+	if (!disconnectAfterHandling && !clientSession->IsReleasePending())
 	{
 		// 다시 다음 수신 요청
 		// 실패하면 이 세션은 pending recv 가 없는 상태로 남아 통신이 조용히 멈추므로
@@ -588,13 +678,14 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		}
 	}
 
-	// 이 핸들러가 세션 사용을 끝냈으므로 이제 카운트를 내려놓는다.
-	clientSession->DecrementIO();
-
+	// disconnect 를 먼저 요청하고 카운트는 마지막에 내린다. (서버 쪽 HandleRecv 와 같다)
 	if (disconnectAfterHandling)
 	{
 		OnDisconnectRequest(clientSession);
 	}
+
+	// 이 함수의 마지막 줄이어야 한다.
+	clientSession->DecrementIO();
 }
 
 void IOCPClient::HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* session)
@@ -605,10 +696,14 @@ void IOCPClient::HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* 
 	if (!overlappedEx)
 		return;
 
+	// 아이디를 먼저 읽어 둔다. DecrementIO 가 마지막 카운트를 내리면
+	// 지연된 disconnect 마무리가 그 자리에서 실행된다.
+	const uint32_t sessionId = session->GetSessionID();
+
 	// 걸어 두었던 WSARecv 에 대한 IO 감소
 	session->DecrementIO();
 
-	LOGI("session %u recv cancelled", session->GetSessionID());
+	LOGI("session %u recv cancelled", sessionId);
 }
 
 void IOCPClient::HandleSend(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
@@ -645,10 +740,13 @@ void IOCPClient::HandleSendCancelled(OverlappedEx* overlappedEx, ClientSession* 
 	if (!overlappedEx)
 		return;
 
+	// 아이디를 먼저 읽는 이유는 HandleRecvCancelled 와 같다.
+	const uint32_t sessionId = session->GetSessionID();
+
 	// 걸어 두었던 WSASend 에 대한 IO 감소
 	session->DecrementIO();
 
-	LOGI("session %u send cancelled", session->GetSessionID());
+	LOGI("session %u send cancelled", sessionId);
 }
 
 void IOCPClient::HandleSessionDisconnected(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
@@ -821,13 +919,16 @@ bool IOCPClient::PostConnect(ClientSession* clientSession)
 		const int nError = ::WSAGetLastError();
 		if (nError != ERROR_IO_PENDING)
 		{
-			// ConnectEx 실패 했으므로 IO 수량 감소
-			clientSession->DecrementIO(); // 접속 실패 했으니 ConnectEx 에 대한 IO 1개 감소
 			clientSession->SetClientSessionState(ClientSessionState::CONNECT_ABORTED);
 
-			OnClientDisconnect(clientSession);
+			// 접속이 성립한 적이 없으므로 종료 통지도 없다.
+			// (HandleConnectCancelled 의 같은 자리 주석 참고)
 
 			OnDisconnectRequest(clientSession);
+
+			// ConnectEx 가 실패했으므로 위에서 올린 몫을 내린다.
+			// 다른 경로와 같은 규칙으로 마지막에 둔다.
+			clientSession->DecrementIO();
 
 			return false;
 		}
@@ -868,25 +969,84 @@ void IOCPClient::OnDisconnectRequest(ISession* session)
 	if (!clientSession)
 		return;
 
+	// 종료 절차는 한 스레드만 수행한다.
+	//
+	// 이 함수는 앱 스레드의 StopClient, ConnectEx 취소 완료 처리, 그리고
+	// recv/send 오류의 NotifyDisconnect 에서 동시에 들어온다. 가드가 없으면
+	// 들어온 스레드가 전부 각자 10초 WaitForIOCancelComplete 를 수행하는데,
+	// 이 클라이언트의 GQCS 워커는 2개뿐이라 그 둘이 대기에 들어가면 취소
+	// 완료 통지를 꺼낼 스레드가 남지 않는다. 카운트가 0 이 되지 못해 모두
+	// 10초를 꽉 채우고, 그 뒤 "취소가 끝나지 않았는데도 소켓을 닫는"
+	// 경로로 넘어간다. 남은 완료 통지가 닫힌 소켓을 참조할 수 있는 상태다.
+	//
+	// 실측으로 bench 실행당 200회 이상이었다. 서버 쪽은 ClientSessionPool 의
+	// poolState CAS 가 같은 역할을 하고 있었고("release skipped" 로그),
+	// 클라이언트 쪽에만 그 가드가 없었다.
+	if (::InterlockedExchange(&m_disconnecting, 1) != 0)
+	{
+		// 다른 스레드가 이미 수행 중이다. 여기서 함께 기다릴 이유가 없다.
+		LOGI("session %u disconnect already in progress, skipping", clientSession->GetSessionID());
+		return;
+	}
+
 	if (clientSession->GetClientSocket() != INVALID_SOCKET)
 	{
-		// Connect, Recv, Send IO 를 모두 취소하고
+		// Connect, Recv, Send IO 를 모두 취소한다.
 		if (!clientSession->CancelPendingIO())
 		{
 			ENGINE_VIOLATION("session %u CancelPendingIO failed during disconnect", clientSession->GetSessionID());
 		}
+	}
 
-		// 취소가 완료되기를 기다린다.
-		if (!clientSession->WaitForIOCancelComplete(10'000))
-		{
-			// 취소가 끝나지 않았는데도 아래에서 소켓을 닫는다.
-			// 남은 완료 통지가 닫힌 소켓을 참조할 수 있다.
-			ENGINE_VIOLATION("session %u IO cancel did not complete, closing the socket anyway", clientSession->GetSessionID());
-		}
+	// 여기서 기다리지 않는다.
+	//
+	// 예전에는 WaitForIOCancelComplete(10초) 였다. 이 함수는 완료 핸들러
+	// 안에서도 불리는데(recv/send 오류 -> HandleSocketError ->
+	// NotifyDisconnect), 그때 그 핸들러는 자기 몫의 카운트를 아직 들고
+	// 있다. 그 카운트를 내려 줄 스레드가 바로 지금 대기 중인 자신이므로
+	// 대기는 풀리지 않는다.
+	//
+	// 클라이언트는 GQCS 워커가 2개뿐이라 이 자기 대기가 특히 나빴다.
+	// 둘 다 대기에 들어가면 취소 완료 통지를 꺼낼 스레드가 하나도 남지
+	// 않아, 다른 경로에서 들어온 스레드까지 10초를 꽉 채웠다.
+	//
+	// 대신 예약해 두고, 마지막 완료가 CompleteDisconnect 를 수행한다.
+	if (!clientSession->RequestRelease())
+	{
+		return;
+	}
 
-		// 모든 IO 취소가 성공적으로 수행되었으면
-		// 소켓을 닫는다.
+	CompleteDisconnect(clientSession);
+}
+
+void IOCPClient::OnReleaseReady(void* context, BaseSession* session)
+{
+	IOCPClient* client = static_cast<IOCPClient*>(context);
+
+	client->CompleteDisconnect(static_cast<ClientSession*>(session));
+}
+
+void IOCPClient::CompleteDisconnect(ClientSession* clientSession)
+{
+	// 남은 완료 통지가 없는 것이 확인된 뒤다. 이제 소켓을 닫아도
+	// 진행 중인 I/O 가 닫힌 핸들을 참조할 일이 없다.
+	if (clientSession->GetClientSocket() != INVALID_SOCKET)
+	{
 		DestroyConnectSocket();
+	}
+
+	// 서비스에 종료를 알린다.
+	//
+	// 여기가 클라이언트의 유일한 종료 지점이다. 예전에는 접속에 실패한
+	// 경우(HandleConnectCancelled, PostConnect 실패)에만 OnClientDisconnect
+	// 가 불렸고, 정작 붙어서 쓰던 연결이 끊길 때는 아무 말이 없었다.
+	// 짝이 거꾸로였다.
+	//
+	// 래치가 그 짝을 보장한다. 접속을 알린 적 없으면 여기서도 알리지 않고,
+	// 알린 적 있으면 정확히 한 번 알린다.
+	if (clientSession->ConsumeServiceConnectNotified())
+	{
+		OnClientDisconnect(clientSession);
 	}
 
 	// 소켓을 닫은 이후 세션에 대한 상태 및 정리를 수행
@@ -972,6 +1132,17 @@ bool IOCPClient::SubmitPacketJob(ISession* session, uint16_t packetId, const cha
 ClientSession* IOCPClient::GetClientSession() const
 {
 	return m_session;
+}
+
+uint32_t IOCPClient::GetOutstandingIOCount() const
+{
+	if (!m_session)
+		return 0;
+
+	const LONG outstanding = m_session->GetOutstandingIOCount();
+
+	// 음수는 짝이 맞지 않는다는 뜻이고 이미 위반으로 잡힌다.
+	return outstanding < 0 ? 0 : static_cast<uint32_t>(outstanding);
 }
 
 void* IOCPClient::GetServiceContext()

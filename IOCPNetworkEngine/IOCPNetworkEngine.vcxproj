@@ -36,6 +36,7 @@
     <ClCompile Include="..\Scheduler\ClientSessionScheduler.cpp" />
     <ClCompile Include="..\Scheduler\ReadySessionQueue.cpp" />
     <ClCompile Include="..\Scheduler\ReadySessionScheduler.cpp" />
+    <ClCompile Include="..\Diagnostics\EngineDiagnostics.cpp" />
     <ClCompile Include="..\Session\AcceptSession.cpp" />
     <ClCompile Include="..\Session\AcceptSessionPool.cpp" />
     <ClCompile Include="..\Session\BaseSession.cpp" />
@@ -55,6 +56,7 @@
     <ClInclude Include="..\Core\IOCPCore.h" />
     <ClInclude Include="..\Core\IOCPServer.h" />
     <ClInclude Include="..\Diagnostics\EngineAssert.h" />
+    <ClInclude Include="..\Diagnostics\EngineDiagnostics.h" />
     <ClInclude Include="..\HandlerTable\PacketHandlerTable.h" />
     <ClInclude Include="..\Job\Job.h" />
     <ClInclude Include="..\Job\JobDefs.h" />

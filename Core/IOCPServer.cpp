@@ -40,6 +40,30 @@
 
 using namespace Core::Util;
 
+namespace
+{
+	// 연결이 죽어서 난 I/O 실패인가.
+	//
+	// ERROR_OPERATION_ABORTED 는 여기 없다. 그건 우리가 CancelIoEx 로 건
+	// 취소이고, 취소를 건 쪽이 이미 세션을 정리하는 중이다. 둘을 같이
+	// 묶어 두었던 것이 이 파일의 오래된 결함이었다 — 연결이 죽은 경우까지
+	// "취소" 로 처리해서 IO 카운트만 내리고 세션은 살려 두었다.
+	bool IsConnectionDeadError(int errorCode)
+	{
+		switch (errorCode)
+		{
+		case WSAECONNRESET:         // 상대가 강제 종료 (RST)
+		case WSAECONNABORTED:       // 연결 중단
+		case WSAENOTCONN:           // 이미 끊김
+		case WSAESHUTDOWN:          // 송수신 불가
+		case ERROR_NETNAME_DELETED: // 네트워크 이름 삭제 = 연결 끊김
+			return true;
+		default:
+			return false;
+		}
+	}
+}
+
 IOCPServer::IOCPServer()
 {
 }
@@ -223,6 +247,14 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 
 	if (!m_sessionManager->Initialize(acceptSlotCount, maxConnectionCount, m_hybridSendPacketPool, m_jobMemoryPool, m_packetMemoryPool, m_generalMemoryPool, IOCPCore::CloseSocketHandle, bufferConfig))
 		return false;
+
+	// 세션 종료 통지를 세션 풀에 맡긴다.
+	//
+	// 이 서버가 직접 부르지 않는다. 반납 경로가 여럿이라(소켓 오류 /
+	// 좀비 정리 / 파싱 실패 / 접속 시퀀스 실패 / 서버 종료) 부르는 자리를
+	// 여기저기 두면 하나씩 빠진다. 실제로 그랬다 — 정상 종료 한 경로에만
+	// 있었다. 반납이 실제로 일어나는 곳은 풀 하나뿐이므로 거기서 부른다.
+	m_sessionManager->SetSessionDisconnectNotifyFunc(&IOCPServer::OnSessionDisconnectNotify, this);
 
 	if (!PrepareAccept())
 	{
@@ -472,25 +504,37 @@ void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* se
 
 		LOGW("session %u recv io failed (error %d)", session->GetSessionID(), errorCode);
 
-		switch (errorCode)
+		if (errorCode == ERROR_OPERATION_ABORTED)
 		{
-		case WSAECONNRESET:       // 연결이 비정상 종료됨 (상대방 강제 종료)
-		case WSAECONNABORTED:     // 연결 중단됨
-		case WSAENOTCONN:         // 연결이 이미 끊김
-		case WSAESHUTDOWN:        // 소켓 송수신 불가
-		case ERROR_NETNAME_DELETED: // 네트워크 이름 삭제됨 (연결 끊김)
+			// 우리가 CancelIoEx 로 취소한 것이다. 취소를 건 쪽이 이미 이
+			// 세션을 정리하고 있으므로 카운트만 내려놓는다.
 			HandleRecvCancelled(overlappedEx, session);
-			break;
-		case ERROR_OPERATION_ABORTED:
-			HandleRecvCancelled(overlappedEx, session);
-			break;
-		default:
-			// 분류되지 않은 에러 코드. 빠져나가면 IO 카운트가 누출되므로
-			// 취소 처리로 보내 카운트를 정리한다.
-			ENGINE_VIOLATION("session %u unhandled recv error %d, treating it as a cancellation", session->GetSessionID(), errorCode);
-			HandleRecvCancelled(overlappedEx, session);
-			break;
+			return;
 		}
+
+		if (!IsConnectionDeadError(errorCode))
+		{
+			// 분류되지 않은 에러 코드. 이 스트림을 계속 믿을 근거가 없으므로
+			// 아래에서 연결이 죽은 것과 같이 다룬다.
+			ENGINE_VIOLATION("session %u unhandled recv error %d, treating the connection as dead",
+				session->GetSessionID(), errorCode);
+		}
+
+		// 연결이 죽었다. 취소와는 다르다 — 아무도 이 세션을 정리하고 있지 않다.
+		//
+		// 예전에는 여기도 HandleRecvCancelled 로만 보냈다. 그 함수는 IO
+		// 카운트만 내린다. 그래서 이 세션은 걸린 수신 없이 IN_USE 로 남아
+		// 슬롯을 붙들었고, 하트비트가 타임아웃으로 걷어 갈 때까지 살아 있었다.
+		//
+		// 실측(Phase 17 churn): 죽은 세션 하나가 4.5초를 붙들었다. 그것도
+		// 타임아웃이 아니라 하트비트 '송신' 이 마침 실패해서 풀린 것이라,
+		// 회수가 운에 기대고 있었다. 피어가 반만 닫았으면 타임아웃까지 갔다.
+		//
+		// 반납을 먼저 예약하고, 카운트는 HandleRecvCancelled 가 마지막에 내린다.
+		// 그 순서여야 우리 몫을 들고 있는 동안 반납이 예약 상태로 머문다.
+		m_sessionManager->ReleaseClientSession(session);
+
+		HandleRecvCancelled(overlappedEx, session);
 
 		return;
 	}
@@ -504,25 +548,23 @@ void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* se
 
 		LOGW("session %u send io failed (error %d)", session->GetSessionID(), errorCode);
 
-		switch (errorCode)
+		if (errorCode == ERROR_OPERATION_ABORTED)
 		{
-		case WSAECONNRESET:       // 연결이 비정상 종료됨 (상대방 강제 종료)
-		case WSAECONNABORTED:     // 연결 중단됨
-		case WSAENOTCONN:         // 연결이 이미 끊김
-		case WSAESHUTDOWN:        // 소켓 송수신 불가
-		case ERROR_NETNAME_DELETED: // 네트워크 이름 삭제됨 (연결 끊김)
+			// 우리가 건 취소다. 정리는 취소를 건 쪽이 한다.
 			HandleSendCancelled(overlappedEx, session);
-			break;
-		case ERROR_OPERATION_ABORTED:
-			HandleSendCancelled(overlappedEx, session);
-			break;
-		default:
-			// 분류되지 않은 에러 코드. 빠져나가면 IO 카운트가 누출되므로
-			// 취소 처리로 보내 카운트를 정리한다.
-			ENGINE_VIOLATION("session %u unhandled send error %d, treating it as a cancellation", session->GetSessionID(), errorCode);
-			HandleSendCancelled(overlappedEx, session);
-			break;
+			return;
 		}
+
+		if (!IsConnectionDeadError(errorCode))
+		{
+			ENGINE_VIOLATION("session %u unhandled send error %d, treating the connection as dead",
+				session->GetSessionID(), errorCode);
+		}
+
+		// 송신이 죽은 연결도 마찬가지다. 수신 쪽 주석 참고.
+		m_sessionManager->ReleaseClientSession(session);
+
+		HandleSendCancelled(overlappedEx, session);
 
 		return;
 	}
@@ -800,56 +842,80 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 	ENGINE_CHECK_RETVOID(clientSession != nullptr, "reached the connect sequence without a client session");
 
+	// 접속 시퀀스가 도는 동안 이 세션을 붙잡아 둔다.
+	//
+	// 시퀀스 안에서 세션이 반납될 수 있다. OnConnect 의 첫 PostReceive 가
+	// 실패하면 HandleSocketError -> NotifyDisconnect -> ReleaseClientSession
+	// 으로 이어지고, 지연 반납은 기다리지 않으므로 그 자리에서 반납이
+	// 끝난다. 그러면 아래 남은 코드와 실패 처리의 ReleaseClientSession 은
+	// 이미 프리 리스트에 올라간 세션을, 운이 나쁘면 그 사이 다른 접속이
+	// 임대해 간 세션을 건드린다.
+	//
+	// 카운트를 하나 들고 있으면 그 반납은 예약 상태로 미뤄지고, 아래
+	// 마지막 DecrementIO 가 0 으로 내리는 순간에 마무리된다.
+	// 완료 핸들러들이 자기 몫을 끝까지 들고 있는 것과 같은 규칙이다.
+	clientSession->IncrementIO();
+
+	if (!RunAcceptedConnectSequence(clientSession))
+	{
+		m_sessionManager->ReleaseClientSession(clientSession);
+	}
+
+	// 이 함수의 마지막 줄이어야 한다. 여기서 반납이 마무리될 수 있으므로
+	// 이후로 clientSession 을 만지면 안 된다.
+	clientSession->DecrementIO();
+}
+
+bool IOCPServer::RunAcceptedConnectSequence(ClientSession* clientSession)
+{
 	LOGT("session %u running the server-side connect sequence", clientSession->GetSessionID());
 
 	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
 	{
 		// 이미 서버가 Shutdown 모드면 이 Accept 결과는 버린다.
-		//m_sessionManager->DecrementAcceptCount();
-
-		// 세션을 다시 풀로 반환
-		m_sessionManager->ReleaseClientSession(clientSession);
-
-		return;
+		return false;
 	}
 
 	if (!SocketOption::SetAcceptContext(clientSession->GetClientSocket(), m_serverSocket))
 	{
 		LOGE("session %u SO_UPDATE_ACCEPT_CONTEXT failed, dropping the connection", clientSession->GetSessionID());
-		m_sessionManager->ReleaseClientSession(clientSession);
-		return;
+		return false;
 	}
 
 	if (!SocketOption::SetNoDelay(clientSession->GetClientSocket()))
 	{
 		LOGE("session %u TCP_NODELAY failed, dropping the connection", clientSession->GetSessionID());
-		m_sessionManager->ReleaseClientSession(clientSession);
-		return;
+		return false;
 	}
 
 	if (!SocketOption::SetKeepAliveEx(clientSession->GetClientSocket(), 10'000, 1'000))
 	{
 		LOGE("session %u keepalive setup failed, dropping the connection", clientSession->GetSessionID());
-		m_sessionManager->ReleaseClientSession(clientSession);
-		return;
+		return false;
 	}
 	//SocketOption::SetLinger(clientsocket, false); // 소켓 종료 즉시(선택)
 
 	if (!IOCPCore::RegisterSocketToIOCP((ULONG_PTR)clientSession, clientSession->GetClientSocket()))
 	{
 		LOGE("session %u could not be associated with the IOCP, dropping the connection", clientSession->GetSessionID());
-		m_sessionManager->ReleaseClientSession(clientSession);
-		return;
+		return false;
 	}
 
 	if (!clientSession->OnConnect())
 	{
-		m_sessionManager->ReleaseClientSession(clientSession);
-		return;
+		return false;
 	}
+
+	// 통지를 부르기 전에 표시한다. 부른 뒤에 표시하면 그 사이에 세션이
+	// 반납될 경우(서비스가 OnClientConnect 안에서 바로 끊는 경우가 있다)
+	// 표시가 서지 않아 종료 통지를 놓친다.
+	clientSession->MarkServiceConnectNotified();
+
 	OnClientConnect(clientSession);
 
 	//Log::log(LogLevel::LOG_INFO, "[%s] New connection accepted. socket: %d", session->getclientsocket());
+
+	return true;
 }
 
 void IOCPServer::HandleAcceptIOCancelled(uint32_t sessionId)
@@ -1005,8 +1071,14 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		OnReceive(clientSession, packetId, packetDataByMemoryPool, packetSize);
 	}
 
-	// 세션을 끊어야 하는 경우에는 다음 수신을 걸지 않는다.
-	if (!releaseSessionAfterHandling)
+	// 처리 도중 반납이 예약됐을 수 있다. 시스템 패킷 응답을 보내려다
+	// WSASend 가 실패하면 HandleSocketError -> NotifyDisconnect 로 이어져
+	// 이 핸들러가 도는 동안 예약이 선다. 그 상태에서 다음 수신을 걸면
+	// 곧 취소될 I/O 를 하나 더 만들 뿐이다.
+	//
+	// 예약이 이미 서 있으면 아래에서 반납을 다시 요청하지 않는다.
+	// 요청해 봐야 poolState 가 이미 RELEASING 이라 "release skipped" 만 남는다.
+	if (!releaseSessionAfterHandling && !clientSession->IsReleasePending())
 	{
 		// 다시 다음 수신 요청
 		// 실패하면 이 세션은 pending recv 가 없는 상태로 남아
@@ -1020,13 +1092,21 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		}
 	}
 
-	// 이 핸들러가 세션 사용을 끝냈으므로 이제 카운트를 내려놓는다.
-	clientSession->DecrementIO();
-
+	// 반납은 먼저 요청하고, 카운트는 마지막에 내려놓는다.
+	//
+	// 순서가 반대였다. 카운트를 먼저 내리면 그 자리에서 반납이 마무리되고
+	// (지연 반납은 기다리지 않는다) 세션이 프리 리스트로 돌아간다. 그 뒤의
+	// ReleaseClientSession 은 이미 남의 것이 된 세션을 반납하려 든다.
+	//
+	// 요청을 먼저 하면 우리가 카운트를 들고 있는 동안 예약 상태로 머물고,
+	// 바로 아래 DecrementIO 가 0 으로 내리는 순간 마무리된다.
 	if (releaseSessionAfterHandling)
 	{
 		m_sessionManager->ReleaseClientSession(clientSession);
 	}
+
+	// 이 함수의 마지막 줄이어야 한다. 이후로 clientSession 을 만지면 안 된다.
+	clientSession->DecrementIO();
 }
 
 void IOCPServer::HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* session)
@@ -1037,9 +1117,14 @@ void IOCPServer::HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* 
 	if (!overlappedEx)
 		return;
 
+	// 세션 아이디를 먼저 읽어 둔다. DecrementIO 가 마지막 카운트를 내리면
+	// 예약된 반납이 그 자리에서 끝나고, 세션은 다른 접속에 재배포될 수 있다.
+	// 그 뒤에 GetSessionID() 를 부르면 남의 아이디를 찍는다.
+	const uint32_t sessionId = session->GetSessionID();
+
 	session->DecrementIO();
 
-	LOGI("session %u recv cancelled", session->GetSessionID());
+	LOGI("session %u recv cancelled", sessionId);
 }
 
 void IOCPServer::HandleSend(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
@@ -1084,9 +1169,12 @@ void IOCPServer::HandleSendCancelled(OverlappedEx* overlappedEx, ClientSession* 
 	if (!overlappedEx)
 		return;
 
+	// 아이디를 먼저 읽는 이유는 HandleRecvCancelled 와 같다.
+	const uint32_t sessionId = session->GetSessionID();
+
 	session->DecrementIO();
 
-	LOGI("session %u send cancelled", session->GetSessionID());
+	LOGI("session %u send cancelled", sessionId);
 }
 
 void IOCPServer::HandleSessionDisconnected(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred)
@@ -1098,15 +1186,24 @@ void IOCPServer::HandleSessionDisconnected(OverlappedEx* overlappedEx, ClientSes
 
 	if (overlappedEx->operation == IO_OPERATION::RECV)
 	{
-		// 서비스 로직에게 세션 끊김을 먼저 알린다.
-		OnClientDisconnect(session);
+		// 여기서 OnClientDisconnect 를 부르지 않는다.
+		//
+		// 예전에는 이 자리가 유일한 종료 통지였다. 그래서 정상 종료(FIN)로
+		// 끝난 세션만 통지를 받았고, RST / 하트비트 타임아웃 / 파싱 실패 /
+		// 접속 시퀀스 실패 / 서버 종료로 끝난 세션은 아무 말 없이 사라졌다.
+		// 이제 반납이 실제로 일어나는 곳(ClientSessionPool)에서 한 번 부른다.
 
-		// RECV I/O 걸려있던 세션이였으므로 IO 수량을 하나 빼주어야 한다.
-		// ReleaseClientSession 이 카운트가 0 이 되기를 기다리므로
-		// 반드시 그보다 먼저 내려놓아야 한다.
-		session->DecrementIO();
-
+		// 반납을 먼저 요청하고 카운트는 마지막에 내린다.
+		//
+		// 예전에는 반대였다. ReleaseClientSession 이 카운트 0 을 기다렸기
+		// 때문에, 우리 몫을 먼저 내려놓지 않으면 자기를 기다리는 꼴이
+		// 됐다. 이제 기다리지 않으므로 그 제약이 사라졌고, 오히려 먼저
+		// 내리면 반납이 그 자리에서 끝나 아래 호출이 남의 세션을 건드린다.
 		m_sessionManager->ReleaseClientSession(session);
+
+		// RECV I/O 가 걸려 있던 세션이므로 그 몫을 여기서 내린다.
+		// 이 분기의 마지막 줄이어야 한다.
+		session->DecrementIO();
 	}
 	else
 	{
@@ -1576,6 +1673,27 @@ uint32_t IOCPServer::GetPostedAcceptCount() const
 uint32_t IOCPServer::GetDesiredAcceptCount() const
 {
 	return m_desiredAcceptCount;
+}
+
+uint32_t IOCPServer::GetOutstandingIOCount() const
+{
+	if (!m_sessionManager)
+		return 0;
+
+	return m_sessionManager->GetOutstandingIOCount();
+}
+
+void IOCPServer::OnSessionDisconnectNotify(void* context, ClientSession* session)
+{
+	static_cast<IOCPServer*>(context)->OnClientDisconnect(session);
+}
+
+uint32_t IOCPServer::GetInUseSessionCount() const
+{
+	if (!m_sessionManager)
+		return 0;
+
+	return m_sessionManager->GetClientSessionInUseCount();
 }
 
 ReadySessionQueue* IOCPServer::GetReadySessionQueue() const

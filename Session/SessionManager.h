@@ -59,8 +59,17 @@ public:
 	ClientSession* GetClientSession(const uint32_t sessionId);
 	uint32_t GetClientSessionCount() const noexcept;
 
+	// Accept / Client 양쪽 세션이 들고 있는 미완료 I/O 총합.
+	// 정상 종료 후에는 0 이어야 한다.
+public:
+	uint32_t GetOutstandingIOCount() const;
+
 	ClientSession* AcquireClientSession();
 	void ReleaseClientSession(ISession* session);
+
+	// 세션 종료를 서비스에 알릴 진입점을 클라이언트 세션 풀에 건다.
+	// 통지를 부르는 자리를 풀 하나로 모으기 위한 배선이다.
+	void SetSessionDisconnectNotifyFunc(SessionDisconnectNotifyFunc notifyFunc, void* context);
 
 	void RequestAllRecvSendIOCancel();
 	bool WaitForAllRecvSendIOCancelComplete(const uint32_t timeout_ms);

@@ -13,6 +13,7 @@
 struct SessionNode;
 
 class ISession;
+class BaseSession;
 class ClientSession;
 class HybridSendPacketPool;
 #include "../Memory/EngineMemoryPoolFwd.h"
@@ -27,6 +28,16 @@ private:
 	mutable SRWLOCK m_lock = SRWLOCK_INIT;
 	ISessionEvent* m_eventHandler = nullptr;
 	CloseSocketFunc m_closeSocketFunc = nullptr;
+
+	// 세션이 실제로 반납될 때 서비스에 종료를 알린다.
+	//
+	// 이 통지를 부르는 자리는 이 풀 하나여야 한다. 예전에는 IOCPServer 의
+	// 정상 종료 처리 한 곳에만 있어서, 그 경로를 지나지 않는 종료
+	// (RST / 하트비트 타임아웃 / 파싱 실패 / 접속 시퀀스 실패 / 서버 종료)
+	// 는 서비스에 전혀 알려지지 않았다. 세션에 자원을 매달아 둔 서비스는
+	// 그만큼을 흘렸다. (실측: churn 60회 중 접속 40건에 종료 통지 20건)
+	SessionDisconnectNotifyFunc m_disconnectNotifyFunc = nullptr;
+	void* m_disconnectNotifyContext = nullptr;
 
 	// 생성자는 실패를 반환할 수 없다. 세션 하나라도 준비에 실패하면 여기가
 	// false 로 남고, SessionManager 가 그걸 보고 초기화를 실패시킨다.
@@ -46,6 +57,10 @@ public:
 	ClientSession* Acquire();
 
 	// 세션 반환
+	//
+	// 기다리지 않는다. 아직 완료되지 않은 I/O 가 있으면 반납을 예약만
+	// 하고 즉시 돌아가며, 그 마지막 완료가 CompleteRelease 를 수행한다.
+	// 그래서 완료 핸들러 안에서 불러도 안전하다.
 	void Release(ClientSession* clientSession);
 
 	// 세션 수량 반환
@@ -77,4 +92,23 @@ public:
 	void SetSocketCloseFunc(CloseSocketFunc closeSocketFunc);
 
 	void SetEventHandler(ISessionEvent* handler);
+
+	// 세션 종료를 서비스에 알릴 진입점을 건다.
+	void SetDisconnectNotifyFunc(SessionDisconnectNotifyFunc notifyFunc, void* context);
+
+	// 지금 이 풀의 세션들이 들고 있는 미완료 I/O 총합.
+	// 하네스가 시나리오 경계에서 회계를 검사한다. 정상 종료 후에는 0 이어야 한다.
+	uint32_t GetOutstandingIOCount() const;
+
+private:
+	// 반납의 뒷부분. 소켓을 닫고 상태를 되돌린 뒤 프리 리스트에 올린다.
+	// Release 가 그 자리에서 부르거나, 마지막 DecrementIO 가 부른다.
+	void CompleteRelease(ClientSession* clientSession);
+
+	// BaseSession 이 마지막 DecrementIO 에서 부르는 진입점.
+	static void OnReleaseReady(void* context, BaseSession* session);
+
+	// 접속을 알린 적 있는 세션에 한해 종료를 한 번만 알린다.
+	// 반납 경로 전부가 이 함수를 지나야 한다.
+	void NotifyServiceDisconnect(ClientSession* clientSession);
 };

@@ -132,6 +132,27 @@ uint32_t SessionManager::GetClientSessionCount() const noexcept
 	return m_clientSessionCount;
 }
 
+void SessionManager::SetSessionDisconnectNotifyFunc(SessionDisconnectNotifyFunc notifyFunc, void* context)
+{
+	if (!m_clientSessionPool)
+		return;
+
+	m_clientSessionPool->SetDisconnectNotifyFunc(notifyFunc, context);
+}
+
+uint32_t SessionManager::GetOutstandingIOCount() const
+{
+	uint32_t total = 0;
+
+	if (m_acceptSessionPool)
+		total += m_acceptSessionPool->GetOutstandingIOCount();
+
+	if (m_clientSessionPool)
+		total += m_clientSessionPool->GetOutstandingIOCount();
+
+	return total;
+}
+
 ClientSession* SessionManager::AcquireClientSession()
 {
 	if (!m_clientSessionPool)

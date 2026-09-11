@@ -13,6 +13,7 @@ enum class IO_OPERATION;
 struct OverlappedEx;
 
 class ISession;
+class BaseSession;
 class ClientSession;
 class HybridSendPacketPool;
 #include "../Memory/EngineMemoryPoolFwd.h"
@@ -54,6 +55,22 @@ private:
 	// Destory Flag
 	LONG m_destroyFlag = 0;
 
+	// 종료 절차를 한 스레드만 수행하게 하는 게이트.
+	//
+	// OnDisconnectRequest 는 여러 경로에서 동시에 들어온다.
+	//   - 앱 스레드의 StopClient()
+	//   - ConnectEx 취소 완료 처리(HandleConnectCancelled)
+	//   - recv/send 소켓 오류 -> ClientSession::NotifyDisconnect
+	//
+	// 가드가 없으면 들어온 스레드마다 종료 절차를 중복 수행한다. 소켓을
+	// 두 번 닫고 OnDisconnect 를 두 번 부른다.
+	// (서버 쪽은 ClientSessionPool 의 poolState CAS 가 같은 역할을 한다)
+	//
+	// 예전에는 그 중복이 각자 10초짜리 WaitForIOCancelComplete 였다.
+	// 이제 그 대기 자체가 없어졌지만(지연 반납) 중복 수행은 여전히
+	// 막아야 하므로 게이트는 남는다.
+	volatile LONG m_disconnecting = 0;
+
 	SOCKET m_clientSocket = INVALID_SOCKET;
 
 	ClientSession* m_session = nullptr;
@@ -93,6 +110,12 @@ private:
 	void HandleSocketError(OverlappedEx* overlappedEx, ClientSession* session, int errorCode, IO_OPERATION ioOperation);
 
 	void HandleConnect(uint32_t sessionId, DWORD bytesTransferred);
+
+	// 접속 완료 후의 소켓 옵션 / OnConnect / 인증 요청까지.
+	// 실패를 반환값 하나로 모으려고 떼어냈다. 이유는 서버 쪽
+	// RunAcceptedConnectSequence 와 같다.
+	bool RunClientConnectSequence();
+
 	void HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSession* session);
 
 	void HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred);
@@ -120,6 +143,14 @@ private:
 
 	void OnDisconnectRequest(ISession* session) override;
 
+	// 종료 절차의 뒷부분. 소켓을 닫고 세션 상태를 정리한다.
+	// OnDisconnectRequest 가 그 자리에서 부르거나(남은 I/O 가 없을 때),
+	// 마지막 DecrementIO 가 부른다.
+	void CompleteDisconnect(ClientSession* clientSession);
+
+	// BaseSession 이 마지막 DecrementIO 에서 부르는 진입점.
+	static void OnReleaseReady(void* context, BaseSession* session);
+
 	// ISessionEvent 의 시그니처가 ISession* 로 고정돼 있어 기반 타입이
 	// 들어오는 유일한 지점이다. 그 포인터가 정말 이 클라이언트의 세션인지
 	// 확인해서 돌려준다. 아니면 nullptr 과 함께 위반을 남긴다.
@@ -132,6 +163,11 @@ public:
 	EngineMemoryPool* GetGeneralMemoryPool() const;
 	const HandlerContext& GetHandlerContext() const;
 	ClientSession* GetClientSession() const;
+
+	// 이 클라이언트 세션이 들고 있는 미완료 I/O 수.
+	// 조용한 상태에서 0 으로 돌아오지 않으면 Increment 와 Decrement 의
+	// 짝이 맞지 않는다는 신호다.
+	uint32_t GetOutstandingIOCount() const;
 	virtual void* GetServiceContext();
 
 

@@ -29,6 +29,10 @@ public:
 	// 세션 수량 반환
 	uint32_t GetSessionCount() const;
 
+	// 이 풀의 accept 세션들이 들고 있는 미완료 I/O 총합.
+	// 정상 종료 후에는 0 이어야 한다. 하네스의 판정 근거다.
+	uint32_t GetOutstandingIOCount() const;
+
 	// 세션 연결 해제
 	//
 	// 이 둘의 소유권은 IOCPServer::StopServer 에 있다. 소멸자는 부르지 않는다.

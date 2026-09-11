@@ -39,6 +39,9 @@ ClientSessionPool::ClientSessionPool(uint32_t capacity, HybridSendPacketPool* hy
 			return;
 		}
 
+		// 마지막 완료가 반납을 마무리할 수 있도록 진입점을 걸어 둔다.
+		m_sessions[i].SetReleaseReadyFunc(&ClientSessionPool::OnReleaseReady, this);
+
 		m_nodes[i].session = &m_sessions[i];
 		m_nodes[i].nextNode = m_freeList;
 		m_freeList = &m_nodes[i];
@@ -123,19 +126,80 @@ void ClientSessionPool::Release(ClientSession* clientSession)
 		{
 			ENGINE_VIOLATION("session %u CancelPendingIO failed during release", sessionId);
 		}
-
-		if (!clientSession->WaitForIOCancelComplete(10'000))
-		{
-			// 취소가 완료되지 않았는데도 아래에서 세션을 리셋하고 풀에 반납한다.
-			// 남은 완료 통지가 회수된 세션을 만질 수 있다.
-			ENGINE_VIOLATION("session %u IO cancel did not complete, releasing it anyway", sessionId);
-		}
 	}
+
+	// 여기서 기다리지 않는다.
+	//
+	// 예전에는 WaitForIOCancelComplete(10초) 였다. 이 함수는 완료 핸들러
+	// 안에서도 불린다(HandleRecv 안의 시스템 패킷 처리가 송신에 실패하면
+	// HandleSocketError -> NotifyDisconnect -> 여기로 온다). 그때 그 핸들러는
+	// 자기 몫의 IO 카운트를 아직 들고 있으므로, 대기는 자기 자신이 내려놓기를
+	// 기다리는 꼴이 된다. 내려놓을 스레드가 바로 대기 중인 자신이니 풀리지
+	// 않고 10초를 꽉 채운다.
+	//
+	// 실측(bench 1회): "IO cancel timed out" 204회, 그 직전에 찍힌
+	// "CancelIoEx found nothing to cancel but N IO operations are still
+	// counted" 142회. 취소할 I/O 는 없는데 카운트만 남아 있는 상태 —
+	// 남아 있던 그 카운트가 대기 중인 스레드 자신의 몫이었다.
+	//
+	// 순서를 바꿔서는 풀 수 없다. HandleRecv 는 세션 사용을 끝낼 때까지
+	// 카운트를 들고 있어야 하고(그게 "카운트 0 = 아무도 안 만짐" 의 근거다),
+	// 반납은 카운트 0 을 봐야 진행할 수 있다. 두 요구가 정면으로 부딪힌다.
+	// 그래서 막지 않는다 — 예약해 두고 마지막 완료가 마무리한다.
+	if (!clientSession->RequestRelease())
+	{
+		return;
+	}
+
+	CompleteRelease(clientSession);
+}
+
+void ClientSessionPool::NotifyServiceDisconnect(ClientSession* clientSession)
+{
+	if (!m_disconnectNotifyFunc)
+		return;
+
+	// 접속을 알린 적 없는 세션은 종료도 알리지 않는다. 수락 직후 거절된
+	// 접속이나 접속 시퀀스가 중간에 실패한 세션이 여기 해당한다.
+	// 래치를 소비하는 스레드는 하나뿐이라 두 번 알리지도 않는다.
+	if (!clientSession->ConsumeServiceConnectNotified())
+		return;
+
+	m_disconnectNotifyFunc(m_disconnectNotifyContext, clientSession);
+}
+
+void ClientSessionPool::OnReleaseReady(void* context, BaseSession* session)
+{
+	ClientSessionPool* pool = static_cast<ClientSessionPool*>(context);
+
+	// 이 풀에 담긴 세션은 전부 ClientSession 이다.
+	pool->CompleteRelease(static_cast<ClientSession*>(session));
+}
+
+void ClientSessionPool::CompleteRelease(ClientSession* clientSession)
+{
+	const uint32_t sessionId = clientSession->GetSessionID();
+
+	if (!m_nodes || sessionId >= m_capacity)
+	{
+		LOGE("invalid session id %u (capacity %u)", sessionId, m_capacity);
+		return;
+	}
+
+	SessionNode* node = &m_nodes[sessionId];
 
 	if (m_closeSocketFunc)
 	{
 		m_closeSocketFunc(clientSession->DetachSocket());
 	}
+
+	// 서비스에 먼저 알린다.
+	//
+	// OnDisconnect 보다 앞이어야 한다. 그쪽이 원격 주소를 지우므로,
+	// 뒤에 알리면 서비스는 "누가 끊겼는지" 를 아이디로만 알게 된다.
+	// 프리 리스트에 올리기 전이어야 하는 것은 더 분명하다 — 올린 뒤에는
+	// 이 세션이 다른 접속에 임대된 상태일 수 있다.
+	NotifyServiceDisconnect(clientSession);
 
 	if (!clientSession->OnDisconnect())
 	{
@@ -288,6 +352,17 @@ void ClientSessionPool::DisconnectAllSessions()
 				m_closeSocketFunc(session->DetachSocket());
 			}
 
+			// 종료 중에도 알린다.
+			//
+			// 서버가 내려갈 때 살아 있던 세션은 반납 경로를 지나지 않아
+			// 통지를 못 받았다. 그러면 "OnClientConnect 를 받은 세션은
+			// 반드시 OnClientDisconnect 를 받는다" 가 성립하지 않고,
+			// 서비스는 종료 시점에만 조용히 자원을 흘린다.
+			//
+			// 이 호출은 StopServer 를 부른 스레드(보통 앱 스레드)에서
+			// 실행된다. 운영 중의 통지가 워커 스레드에서 오는 것과 다르다.
+			NotifyServiceDisconnect(session);
+
 			if (!session->OnDisconnect())
 			{
 				ENGINE_VIOLATION("session %u OnDisconnect reported failure", session->GetSessionID());
@@ -391,6 +466,32 @@ uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t 
 	}
 
 	return disconnectedCount;
+}
+
+uint32_t ClientSessionPool::GetOutstandingIOCount() const
+{
+	if (!m_sessions)
+		return 0;
+
+	uint32_t total = 0;
+
+	for (uint32_t i = 0; i < m_capacity; ++i)
+	{
+		const LONG outstanding = m_sessions[i].GetOutstandingIOCount();
+
+		// 음수는 짝이 안 맞는다는 뜻이라 이미 위반으로 잡힌다.
+		// 여기서 더해 상쇄시키면 합계가 0 으로 보여 오히려 숨는다.
+		if (outstanding > 0)
+			total += static_cast<uint32_t>(outstanding);
+	}
+
+	return total;
+}
+
+void ClientSessionPool::SetDisconnectNotifyFunc(SessionDisconnectNotifyFunc notifyFunc, void* context)
+{
+	m_disconnectNotifyFunc = notifyFunc;
+	m_disconnectNotifyContext = context;
 }
 
 void ClientSessionPool::SetSocketCloseFunc(CloseSocketFunc closeSocketFunc)

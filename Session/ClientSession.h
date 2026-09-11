@@ -66,6 +66,10 @@ private:
 	volatile LONG m_sending = 0; // sending flag: 0 = not sending, 1 = sending (Interlocked)
 	volatile LONG m_processing = 0; // processing flag: 0 = idle, 1 = being processed by a worker
 
+	// 서비스에 접속을 알렸는가. 종료 통지의 짝을 맞추는 래치다.
+	// (MarkServiceConnectNotified / ConsumeServiceConnectNotified 주석 참고)
+	volatile LONG m_serviceConnectNotified = 0;
+
 	ISessionEvent* m_eventHandler = nullptr;
 
 	// 서비스 로직별 세션 컨텍스트
@@ -98,6 +102,23 @@ public:
 	// IsEstablished 는 인증까지 끝났는가. (설명은 .cpp 주석)
 	bool IsTransportConnected() const;
 	bool IsEstablished() const;
+
+	// --- 서비스 접속/종료 통지의 짝 맞추기 ---
+	//
+	// OnClientConnect 를 받은 세션만 OnClientDisconnect 를 받아야 하고,
+	// 정확히 한 번만 받아야 한다. 그 조건을 세션에 래치로 들고 있는다.
+	//
+	// 상태(ServerSessionState 등)로 대신할 수 없다. OnConnect 가 성공해
+	// CONNECTED 로 가더라도 그 직후 통지 호출까지 갔는지는 상태에 남지
+	// 않는다. 접속 시퀀스가 중간에 실패하면 통지 없이 끝난다.
+	void MarkServiceConnectNotified();
+
+	// 종료를 알려야 하는가. true 는 한 스레드에게만 돌아간다.
+	//
+	// 반납 경로가 여럿이고(소켓 오류 / 좀비 정리 / 서버 종료) 서로 겹칠
+	// 수 있으므로, "알릴 차례인가" 와 "표시 지우기" 가 한 번에 일어나야
+	// 두 번 알리지 않는다.
+	bool ConsumeServiceConnectNotified();
 
 	OverlappedEx& GetConnectOverlapped();
 

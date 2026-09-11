@@ -6,6 +6,7 @@
 #include <Windows.h>
 
 #include "../../Core/Util/Logger.h"
+#include "EngineDiagnostics.h"
 
 // ---------------------------------------------------------------------------
 // 엔진 불변식 위반 처리 정책
@@ -36,18 +37,24 @@
 	} while (0)
 
 // 불변식 위반. 로그를 남기고 디버거가 있으면 중단한다. 흐름은 계속된다.
-#define ENGINE_VIOLATION(...)          \
-	do {                               \
-		LOGE(__VA_ARGS__);             \
-		ENGINE_BREAK_IF_DEBUGGER();    \
+//
+// 계수기도 함께 올린다. 로그만 남기던 시절에는 하네스가 위반을 판정에
+// 쓸 수 없었다. 위반이 쏟아지는 실행도 테스트는 PASS 로 끝냈고, 사람이
+// 로그를 grep 할 때만 드러났다.
+#define ENGINE_VIOLATION(...)                    \
+	do {                                         \
+		Engine::Diagnostics::NoteViolation();    \
+		LOGE(__VA_ARGS__);                       \
+		ENGINE_BREAK_IF_DEBUGGER();              \
 	} while (0)
 
 // 복구 불가능한 손상(메모리 훼손 등). 반드시 남아야 하므로 LOGC 를 쓴다.
 // 프로세스를 죽이지는 않는다. 죽여도 로그 이상의 정보를 얻지 못한다.
-#define ENGINE_CORRUPTION(...)         \
-	do {                               \
-		LOGC(__VA_ARGS__);             \
-		ENGINE_BREAK_IF_DEBUGGER();    \
+#define ENGINE_CORRUPTION(...)                   \
+	do {                                         \
+		Engine::Diagnostics::NoteViolation();    \
+		LOGC(__VA_ARGS__);                       \
+		ENGINE_BREAK_IF_DEBUGGER();              \
 	} while (0)
 
 // 조건이 거짓이면 위반으로 처리한다.

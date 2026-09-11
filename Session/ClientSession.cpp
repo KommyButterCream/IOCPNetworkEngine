@@ -108,6 +108,11 @@ void ClientSession::ResetSession()
 	::InterlockedExchange(&m_sending, 0);
 	::InterlockedExchange(&m_processing, 0);
 
+	// 래치가 남아 있으면 다음 접속이 이 세션을 쓰다가, 접속을 알린 적도
+	// 없는데 종료 통지를 받는다. 정상 경로에서는 반납 직전에 이미
+	// 소비되지만 통지 배선이 없는 구성도 있어 여기서 확실히 지운다.
+	::InterlockedExchange(&m_serviceConnectNotified, 0);
+
 	if (m_sessionContext)
 	{
 		delete m_sessionContext;
@@ -420,6 +425,16 @@ bool ClientSession::IsTransportConnected() const
 		return (GetServerSessionState() == ServerSessionState::CONNECTED || GetServerSessionState() == ServerSessionState::AUTH_PENDING || GetServerSessionState() == ServerSessionState::ESTABLISHED || GetServerSessionState() == ServerSessionState::HEARTBEAT_TIMEOUT);
 
 	return false;
+}
+
+void ClientSession::MarkServiceConnectNotified()
+{
+	::InterlockedExchange(&m_serviceConnectNotified, 1);
+}
+
+bool ClientSession::ConsumeServiceConnectNotified()
+{
+	return (::InterlockedExchange(&m_serviceConnectNotified, 0) == 1);
 }
 
 bool ClientSession::IsEstablished() const
@@ -817,9 +832,17 @@ void ClientSession::HandleSocketError(int errorCode, IO_OPERATION ioOperation)
 	else
 		LOGE("session %u io %d socket error %d", GetSessionID(), (int)ioOperation, errorCode);
 
-	// 공용으로 처리 되어야 하는 예외 처리
-	// WSASend 호출 이전에 증가시켰던 Send/Recv IO Count 복구
-	DecrementIO();
+	// DecrementIO 는 이 함수 끝에서 한다.
+	//
+	// 여기서 복구하려는 카운트는 방금 실패한 WSARecv / WSASend 몫이다.
+	// 예전에는 그걸 함수 맨 앞에서 내렸는데, 아래 정리와 NotifyDisconnect 가
+	// 전부 그 뒤에 있었다. 지연 반납이 들어오면서 이 순서가 위험해졌다 —
+	// 여기서 카운트가 0 이 되면 그 자리에서 세션이 반납되고 프리 리스트에
+	// 올라가, 아래 코드가 이미 회수된(그리고 다른 접속에 재배포됐을 수도
+	// 있는) 세션을 계속 만진다.
+	//
+	// 정리를 먼저 끝내고 마지막에 내려놓는다. NotifyDisconnect 는 이제
+	// 기다리지 않고 예약만 하므로 이 순서가 성립한다.
 
 	// IO Operation Type 에 따른 우선 처리 되어야 하는 예외 처리
 	if (ioOperation == IO_OPERATION::RECV)
@@ -875,6 +898,11 @@ void ClientSession::HandleSocketError(int errorCode, IO_OPERATION ioOperation)
 		//Log::Error("[Session %u] Unknown socket error %d (op=%d)", m_sessionId, err, opType);
 		break;
 	}
+
+	// 실패한 I/O 몫을 여기서 내려놓는다. 이 함수의 마지막 줄이어야 한다.
+	// 위에서 NotifyDisconnect 가 반납을 예약했다면, 이 호출이 카운트를
+	// 0 으로 내리는 순간 반납이 마무리된다. 그 뒤로 세션을 만지면 안 된다.
+	DecrementIO();
 }
 
 void ClientSession::SetEventHandler(ISessionEvent* handler)

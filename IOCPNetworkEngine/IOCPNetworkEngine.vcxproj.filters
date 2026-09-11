@@ -90,6 +90,9 @@
     <ClCompile Include="..\Session\AcceptSessionPool.cpp">
       <Filter>Session</Filter>
     </ClCompile>
+    <ClCompile Include="..\Diagnostics\EngineDiagnostics.cpp">
+      <Filter>Diagnostics</Filter>
+    </ClCompile>
     <ClCompile Include="..\Session\BaseSession.cpp">
       <Filter>Session</Filter>
     </ClCompile>
@@ -135,6 +138,9 @@
       <Filter>Core</Filter>
     </ClInclude>
     <ClInclude Include="..\Diagnostics\EngineAssert.h">
+      <Filter>Diagnostics</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Diagnostics\EngineDiagnostics.h">
       <Filter>Diagnostics</Filter>
     </ClInclude>
     <ClInclude Include="..\HandlerTable\PacketHandlerTable.h">
