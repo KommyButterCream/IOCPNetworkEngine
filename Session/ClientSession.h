@@ -182,11 +182,21 @@ public:
 	void SetEventHandler(ISessionEvent* handler);
 	void NotifyDisconnect();
 
-
-protected:
-	virtual void OnClientConnect(ISession* session) {};
-	virtual void OnClientDisconnect(ISession* session) {};
-	virtual void OnReceive(ISession* session, uint16_t packetId, const char* packetData, uint32_t packetSize) {};
-	virtual void OnSend(ISession* session, uint32_t bytesTransferred) {};
+	// 여기에 서비스 훅(OnClientConnect / OnClientDisconnect / OnReceive /
+	// OnSend)이 protected 가상으로 네 개 더 있었다. 전부 죽은 선언이었다.
+	//
+	//   이 클래스는 final 이라 재정의가 문법적으로 불가능하고,
+	//   protected 라 밖에서 부를 수도 없고,
+	//   ClientSession 자신도 한 번도 부르지 않았고,
+	//   ISession / BaseSession 에 같은 이름이 없어 무언가를 재정의하던
+	//   것도 아니었다.
+	//
+	// 실제 훅은 IOCPServer / IOCPClient 쪽 동명 가상이고, 서비스는 그것을
+	// 재정의한다. 세션에 달린 사본은 같은 이름이 두 계층에 있다는 사실만으로
+	// "세션을 상속해서 받는 길도 있나" 를 찾게 만드는 함정이었다.
+	//
+	// ISession 을 순수 가상 14개에서 1개로 줄일 때의 판단과 같은 정리다 —
+	// virtual 은 재정의될 수 있다는 선언인데, 그게 참이 아니면 읽는 사람의
+	// 시간만 쓴다.
 };
 
