@@ -28,10 +28,34 @@ public:
 protected:
 	bool m_destroyFlag = false;
 
+	// 역할. Initialize 에서 한 번 정해지고 그 뒤로 바뀌지 않는다.
+	// 세션이 어떤 I/O 에도 등록되기 전에 쓰이므로 원자 접근이 필요 없다.
 	SESSION_ROLE m_sessionRole = SESSION_ROLE::NONE;
-	ClientSessionState m_clientSessionState = ClientSessionState::NONE;
-	ServerSessionState m_serverSessionState = ServerSessionState::NONE;
-	AcceptSessionState m_acceptSessionState = AcceptSessionState::NONE;
+
+	// 세션 상태.
+	//
+	// 예전에는 평범한 enum 멤버였다. 그런데 쓰는 쪽과 읽는 쪽이 다른 스레드다.
+	//   쓰기 : HeartbeatThread    -> MarkHeartbeatTimeout (HEARTBEAT_TIMEOUT)
+	//          IOCP 워커          -> 접속/인증 시퀀스 (CONNECTED, AUTH_PENDING, ESTABLISHED)
+	//          반납 경로          -> ResetSession / Finalize (CONNECT_READY)
+	//   읽기 : IOCP 워커          -> HandleRecv 안의 IsEstablished() 로
+	//                                서비스 패킷 디스패치 여부를 가른다
+	//          앱 스레드          -> StopServer -> DisconnectAllSessions
+	//
+	// 지금까지 드러나지 않은 것은 두 가지 우연 덕분이었다. x64 MSVC 에서
+	// 정렬된 4바이트 접근이 찢어지지 않는다는 것, 그리고 접근자가 다른 번역
+	// 단위에 있어 인라인되지 않으므로 컴파일러가 값을 레지스터에 눌러
+	// 담아두지 못한다는 것. 둘 다 설정 하나로(LTCG/WPO) 사라지는 전제다.
+	//
+	// AcceptSession::m_slotOwned 가 같은 부류의 문제를 먼저 맞았다 —
+	// 상태가 원자적이지 않아 두 스레드가 같은 슬롯을 비었다고 읽었다.
+	// 그쪽은 CAS 플래그를 따로 뒀지만 나머지 상태는 그대로 남아 있었다.
+	//
+	// 저장은 volatile LONG 이고 접근은 반드시 Interlocked 로만 한다.
+	// 읽기 관용구는 IsReleasePending / GetOutstandingIOCount 와 같다.
+	volatile LONG m_clientSessionState = static_cast<LONG>(ClientSessionState::NONE);
+	volatile LONG m_serverSessionState = static_cast<LONG>(ServerSessionState::NONE);
+	volatile LONG m_acceptSessionState = static_cast<LONG>(AcceptSessionState::NONE);
 
 	SOCKET m_clientSocket = INVALID_SOCKET;
 
@@ -80,14 +104,43 @@ public:
 	//
 	// 역할별로 쓰는 것이 하나씩 정해져 있다. accept 세션은 Accept 상태만,
 	// 서버 역할 세션은 Server 상태만 쓴다.
-	void SetClientSessionState(ClientSessionState sessionState) { m_clientSessionState = sessionState; }
-	ClientSessionState GetClientSessionState() const { return m_clientSessionState; }
+	//
+	// 헤더에 남겨 인라인시킨다. Interlocked 는 내장 함수라 DLL 호출이 생기지
+	// 않으므로, 접근자를 .cpp 로 내리면 호출 비용만 늘고 얻는 것이 없다.
+	//
+	// 주의: 값 하나로 여러 번 비교해야 하면 getter 를 여러 번 부르지 말고
+	// 지역 변수에 한 번 받아서 쓴다. 호출마다 다시 읽으므로 비교 도중에
+	// 값이 바뀌면 어느 분기에도 걸리지 않는 결과가 나온다.
+	// (IsTransportConnected 가 그 예다)
+	void SetClientSessionState(ClientSessionState sessionState)
+	{
+		::InterlockedExchange(&m_clientSessionState, static_cast<LONG>(sessionState));
+	}
+	ClientSessionState GetClientSessionState() const
+	{
+		return static_cast<ClientSessionState>(::InterlockedCompareExchange(
+			const_cast<volatile LONG*>(&m_clientSessionState), 0, 0));
+	}
 
-	void SetServerSessionState(ServerSessionState sessionState) { m_serverSessionState = sessionState; }
-	ServerSessionState GetServerSessionState() const { return m_serverSessionState; }
+	void SetServerSessionState(ServerSessionState sessionState)
+	{
+		::InterlockedExchange(&m_serverSessionState, static_cast<LONG>(sessionState));
+	}
+	ServerSessionState GetServerSessionState() const
+	{
+		return static_cast<ServerSessionState>(::InterlockedCompareExchange(
+			const_cast<volatile LONG*>(&m_serverSessionState), 0, 0));
+	}
 
-	void SetAcceptSessionState(AcceptSessionState sessionState) { m_acceptSessionState = sessionState; }
-	AcceptSessionState GetAcceptSessionState() const { return m_acceptSessionState; }
+	void SetAcceptSessionState(AcceptSessionState sessionState)
+	{
+		::InterlockedExchange(&m_acceptSessionState, static_cast<LONG>(sessionState));
+	}
+	AcceptSessionState GetAcceptSessionState() const
+	{
+		return static_cast<AcceptSessionState>(::InterlockedCompareExchange(
+			const_cast<volatile LONG*>(&m_acceptSessionState), 0, 0));
+	}
 
 	// --- 타입 및 식별자 ---
 	SESSION_ROLE GetSessionRole() const { return m_sessionRole; }

@@ -371,11 +371,29 @@ bool ClientSession::IsReady() const
 // 계산하니 독자는 없는 구분을 찾게 되고, 한쪽만 고치면 조용히 갈라진다.
 bool ClientSession::IsTransportConnected() const
 {
+	// 상태를 지역 변수에 한 번만 받는다.
+	//
+	// 예전에는 비교마다 getter 를 다시 불렀다. 상태가 평범한 멤버이던
+	// 시절에도 옳지 않았고(다른 스레드가 그 사이에 바꾼다) 지금은 호출마다
+	// 실제로 다시 읽으므로 분명한 결함이다. 비교 도중에 값이 바뀌면
+	// 어느 항목에도 걸리지 않아, 실제로는 접속되어 있는 세션이
+	// "접속 아님" 으로 판정될 수 있다.
 	if (GetSessionRole() == SESSION_ROLE::CLIENT)
-		return (GetClientSessionState() == ClientSessionState::CONNECTED || GetClientSessionState() == ClientSessionState::AUTH_PENDING || GetClientSessionState() == ClientSessionState::ESTABLISHED);
+	{
+		const ClientSessionState state = GetClientSessionState();
+		return (state == ClientSessionState::CONNECTED
+			|| state == ClientSessionState::AUTH_PENDING
+			|| state == ClientSessionState::ESTABLISHED);
+	}
 
 	if (GetSessionRole() == SESSION_ROLE::SERVER)
-		return (GetServerSessionState() == ServerSessionState::CONNECTED || GetServerSessionState() == ServerSessionState::AUTH_PENDING || GetServerSessionState() == ServerSessionState::ESTABLISHED || GetServerSessionState() == ServerSessionState::HEARTBEAT_TIMEOUT);
+	{
+		const ServerSessionState state = GetServerSessionState();
+		return (state == ServerSessionState::CONNECTED
+			|| state == ServerSessionState::AUTH_PENDING
+			|| state == ServerSessionState::ESTABLISHED
+			|| state == ServerSessionState::HEARTBEAT_TIMEOUT);
+	}
 
 	return false;
 }
@@ -661,20 +679,41 @@ bool ClientSession::EnqueueJob(Job* job, bool& wasEmpty)
 	return true;
 }
 
+// 잡을 이 세션의 큐에 올린다.
+//
+// 소유권
+//   성공하면 job 과 job->data 는 큐의 것이다.
+//   실패하면 둘 다 부르는 쪽에 그대로 남는다. 부르는 쪽이 반납해야 한다.
+//
+// 예전에는 이 함수가 실패 경로에서 직접 반납했다. 그런데 반납에 쓰는 풀이
+// 세션의 멤버라, 초기화를 지나지 않은(또는 이미 정리된) 세션에서는 전부
+// null 이었다. 그러면 맨 앞의 검사에 걸려 아무것도 반납하지 않은 채 false 만
+// 돌아갔고, job 과 패킷이 조용히 샜다. 부르는 쪽은 계약상 소유권을 넘긴
+// 것으로 알고 있으므로 아무도 회수하지 않는다.
+//
+// 그래서 반납을 그 메모리를 잡은 쪽으로 되돌린다. 부르는 쪽
+// (IOCPClient::SubmitPacketJob)의 풀은 잡기 직전에 유효성이 확인되어 있어
+// 항상 되돌릴 수 있다. 서버 쪽 SubmitPacketJob 이 원래 그 형태다.
 bool ClientSession::SubmitJob(Job* job)
 {
-	if (!job || !m_jobMemoryPool || !m_packetMemoryPool || !m_generalMemoryPool)
+	if (!job)
 		return false;
 
-	bool wasEmpty = false;
-	if (!EnqueueJob(job, wasEmpty))
+	// EnqueueJob 이 GetJobQueue() 를 역참조하는데 그쪽에는 null 검사가 없다.
+	// 큐가 없는 세션에서는 곧바로 null 역참조가 되므로 여기서 막는다.
+	//
+	// 예전의 풀 검사가 이 시점을 우연히 같이 가리고 있었다 — 큐와 풀이
+	// InitializeMemoryPool 에서 함께 설정되기 때문이다. 막아야 할 대상은
+	// 큐이므로 검사도 큐를 본다.
+	if (!m_jobQueue)
 	{
-		MEMORY_POOL::ReleasePacket(*m_packetMemoryPool, *m_generalMemoryPool, job->data);
-		MEMORY_POOL::ReleaseJob(*m_jobMemoryPool, job);
+		ENGINE_VIOLATION("session %u cannot submit a job : the session job queue is not initialized",
+			GetSessionID());
 		return false;
 	}
 
-	return true;
+	bool wasEmpty = false;
+	return EnqueueJob(job, wasEmpty);
 }
 
 bool ClientSession::EnqueueSendPacket(void** packetData, uint32_t packetSize)

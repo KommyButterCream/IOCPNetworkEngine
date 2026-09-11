@@ -36,10 +36,13 @@ using namespace Core::Util;
 
 namespace
 {
-	// 연결이 죽어서 난 I/O 실패인가. (IOCPServer.cpp 의 같은 이름 참고)
+	// 연결이 죽어서 난 I/O 실패인가.
 	//
 	// ERROR_OPERATION_ABORTED 는 여기 없다. 그건 우리가 건 취소이고,
 	// 취소를 건 쪽이 이미 종료 절차를 밟고 있다.
+	//
+	// !! IOCPServer.cpp 에 같은 이름의 사본이 있다. 목록을 고치면 양쪽을
+	//    같이 고쳐야 한다. (갈라졌던 경위는 그쪽 주석 참고)
 	bool IsConnectionDeadError(int errorCode)
 	{
 		switch (errorCode)
@@ -739,6 +742,13 @@ void IOCPClient::HandleSend(OverlappedEx* overlappedEx, ClientSession* session, 
 		return;
 	}
 
+	// 선언만 되어 있고 엔진이 부르지 않던 훅이다. OnReceive 와 대칭이 맞아야
+	// 서비스가 송신 완료를 관측할 수 있다.
+	//
+	// 서버 쪽(IOCPServer::HandleSend)은 이미 고쳐져 있었는데 이쪽만 빠져
+	// 있었다. 같은 처리가 두 곳에 따로 구현되어 있어서 생긴 누락이다.
+	OnSend(session, bytesTransferred);
+
 	// OnSendCompleted 가 다음 패킷의 WSASend 까지 발행하므로 처리 후에 내린다.
 	clientSession->OnSendCompleted(bytesTransferred);
 
@@ -1137,9 +1147,21 @@ bool IOCPClient::SubmitPacketJob(ISession* session, uint16_t packetId, const cha
 
 	job->SetPacketJob(JobType::PACKET, handler, session, packetId, packetData, packetSize, m_handlerContext);
 
-	// SubmitJob 이 실패 시 패킷과 Job 을 함께 회수한다.
-	// (선언만 되어 있고 아무도 부르지 않던 함수다. 원래 이 자리였다)
-	return clientSession->SubmitJob(job);
+	// SubmitJob 이 실패하면 job 과 패킷의 소유권은 여기 그대로 남는다.
+	// 잡은 쪽이 반납한다 — 이쪽 풀은 위에서 유효성이 확인되어 있으므로
+	// 항상 되돌릴 수 있다. (사정은 ClientSession::SubmitJob 주석 참고)
+	//
+	// 서버 쪽 SubmitPacketJob 의 EnqueueJob 실패 자리와 구조가 같다.
+	if (!clientSession->SubmitJob(job))
+	{
+		LOGE("failed to enqueue a job for packet id %u", packetId);
+
+		dropPacket();
+		MEMORY_POOL::ReleaseJob(*m_jobMemoryPool, job);
+		return false;
+	}
+
+	return true;
 }
 
 ClientSession* IOCPClient::GetClientSession() const

@@ -38,9 +38,9 @@ bool BaseSession::Initialize(SESSION_ROLE sessionType, uint32_t sessionId)
 
 void BaseSession::ResetSession()
 {
-	m_clientSessionState = ClientSessionState::NONE;
-	m_serverSessionState = ServerSessionState::NONE;
-	m_acceptSessionState = AcceptSessionState::NONE;
+	SetClientSessionState(ClientSessionState::NONE);
+	SetServerSessionState(ServerSessionState::NONE);
+	SetAcceptSessionState(AcceptSessionState::NONE);
 
 	if (m_clientSocket != INVALID_SOCKET)
 	{
@@ -100,9 +100,9 @@ void BaseSession::Finalize()
 			GetSessionID(), remainingIo);
 	}
 
-	m_clientSessionState = ClientSessionState::NONE;
-	m_serverSessionState = ServerSessionState::NONE;
-	m_acceptSessionState = AcceptSessionState::NONE;
+	SetClientSessionState(ClientSessionState::NONE);
+	SetServerSessionState(ServerSessionState::NONE);
+	SetAcceptSessionState(AcceptSessionState::NONE);
 
 	if (m_clientSocket != INVALID_SOCKET)
 	{
@@ -356,13 +356,13 @@ bool BaseSession::OnDisconnect()
 		switch (m_sessionRole)
 		{
 		case SESSION_ROLE::CLIENT:
-			m_clientSessionState = ClientSessionState::DISCONNECTED;
+			SetClientSessionState(ClientSessionState::DISCONNECTED);
 			break;
 		case SESSION_ROLE::SERVER:
-			m_serverSessionState = ServerSessionState::DISCONNECTED;
+			SetServerSessionState(ServerSessionState::DISCONNECTED);
 			break;
 		case SESSION_ROLE::ACCEPT:
-			m_acceptSessionState = AcceptSessionState::DISCONNECTED;
+			SetAcceptSessionState(AcceptSessionState::DISCONNECTED);
 			break;
 		default:
 			break;

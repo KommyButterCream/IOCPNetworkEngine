@@ -48,15 +48,23 @@ namespace
 	// 취소이고, 취소를 건 쪽이 이미 세션을 정리하는 중이다. 둘을 같이
 	// 묶어 두었던 것이 이 파일의 오래된 결함이었다 — 연결이 죽은 경우까지
 	// "취소" 로 처리해서 IO 카운트만 내리고 세션은 살려 두었다.
+	//
+	// !! IOCPClient.cpp 에 같은 이름의 사본이 있다. 목록을 고치면 양쪽을
+	//    같이 고쳐야 한다. 실제로 한 번 갈라졌다 — 클라에만
+	//    ERROR_CONNECTION_ABORTED 가 추가되어 있어서, 서버는 같은 오류를
+	//    "분류되지 않은 에러" 로 보고 ENGINE_VIOLATION 을 올렸다.
+	//    동작은 같았지만(어차피 죽은 연결로 처리한다) 하네스가 판정에 쓰는
+	//    위반 계수기가 그만큼 더럽혀졌다.
 	bool IsConnectionDeadError(int errorCode)
 	{
 		switch (errorCode)
 		{
-		case WSAECONNRESET:         // 상대가 강제 종료 (RST)
-		case WSAECONNABORTED:       // 연결 중단
-		case WSAENOTCONN:           // 이미 끊김
-		case WSAESHUTDOWN:          // 송수신 불가
-		case ERROR_NETNAME_DELETED: // 네트워크 이름 삭제 = 연결 끊김
+		case WSAECONNRESET:           // 상대가 강제 종료 (RST)
+		case WSAECONNABORTED:         // 연결 중단
+		case WSAENOTCONN:             // 이미 끊김
+		case WSAESHUTDOWN:            // 송수신 불가
+		case ERROR_NETNAME_DELETED:   // 네트워크 이름 삭제 = 연결 끊김
+		case ERROR_CONNECTION_ABORTED: // Win32 쪽 코드로 올라오는 연결 중단
 			return true;
 		default:
 			return false;
@@ -356,18 +364,38 @@ void IOCPServer::StopServer()
 	LOGI("shutting down the IOCP core");
 	IOCPCore::Stop();
 
-	if (m_sessionManager)
-	{
-		delete m_sessionManager;
-		m_sessionManager = nullptr;
-	}
-
+	// 세션을 만지는 스레드를 먼저 전부 없앤 뒤에 세션을 지운다.
+	//
+	// 예전에는 세션 매니저를 먼저 지웠다. IOCPCore::Stop() 이 조인하는 것은
+	// GQCS 워커뿐이고 ReadySessionWorker 는 그대로 살아 있으므로, 그 순서에서는
+	// 워커가 들고 있던 세션이 발밑에서 사라진다.
+	//
+	//   worker : session = m_readySessionQueue->Pop()   유효한 세션을 집는다
+	//   main   : delete m_sessionManager                ~ClientSession 이 잡 큐까지 지운다
+	//   worker : session->GetJobQueue().DequeueJob()    해제된 SRWLOCK
+	//            job->Execute()                         서비스 핸들러에 죽은 ISession*
+	//            session->UpdateProcessingFlag(0)       해제된 메모리에 Interlocked
+	//
+	// 유휴 상태에서는 워커가 Pop 에 잠들어 세션 포인터를 들고 있지 않으므로
+	// 드러나지 않는다. 부하가 걸린 채로 종료할 때만 창이 열린다.
+	//
+	// 클라이언트 쪽(StopClient)은 원래부터 이 순서였다. 같은 종료 절차가 두 곳에
+	// 따로 구현되어 있어서 한쪽만 맞은 상태로 남아 있었다.
 	if (m_readySessionScheduler)
 	{
 		delete m_readySessionScheduler;
 		m_readySessionScheduler = nullptr;
 	}
 
+	if (m_sessionManager)
+	{
+		delete m_sessionManager;
+		m_sessionManager = nullptr;
+	}
+
+	// 준비 큐는 스케줄러보다 뒤에 지운다.
+	// ReadySessionScheduler::Finalize 가 워커를 깨우려고 이 큐의 WakeAll 을
+	// 부르므로, 조인이 끝날 때까지 살아 있어야 한다.
 	if (m_readySessionQueue)
 	{
 		delete m_readySessionQueue;
@@ -769,11 +797,16 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 			SOCKET acceptedSocket = acceptSession->DetachSocket();
 
-			if (clientSession->GetClientSocket() != INVALID_SOCKET || clientSession->GetServerSessionState() != ServerSessionState::CONNECT_READY)
+			// 검사한 값과 보고하는 값이 같아야 하므로 한 번만 읽는다.
+			// 따로 읽으면 위반을 기록하면서 그 근거로는 멀쩡한 값을 찍을 수 있다.
+			const SOCKET handedOutSocket = clientSession->GetClientSocket();
+			const ServerSessionState handedOutState = clientSession->GetServerSessionState();
+
+			if (handedOutSocket != INVALID_SOCKET || handedOutState != ServerSessionState::CONNECT_READY)
 			{
 				// 풀에서 막 임대한 세션이 깨끗하지 않다. 사용 중인 세션이 재배포된 것이다.
 				ENGINE_VIOLATION("session %u was handed out but is not clean (socket %d, state %d)",
-					clientSession->GetSessionID(), static_cast<int>(clientSession->GetClientSocket()), static_cast<int>(clientSession->GetServerSessionState()));
+					clientSession->GetSessionID(), static_cast<int>(handedOutSocket), static_cast<int>(handedOutState));
 			}
 
 			LOGI("socket %d attached to session %u (via accept session %u)", (int)acceptedSocket, clientSession->GetSessionID(), acceptSession->GetSessionID());
@@ -1887,8 +1920,12 @@ IOCPServer::SystemPacketResult IOCPServer::HandleSystemPacket(ClientSession* ses
 		}
 
 		const CS_SYSTEM_AUTH_REQUEST_PACKET* request = reinterpret_cast<const CS_SYSTEM_AUTH_REQUEST_PACKET*>(packetData);
-		if (session->GetServerSessionState() != ServerSessionState::CONNECTED &&
-			session->GetServerSessionState() != ServerSessionState::AUTH_PENDING)
+
+		// 두 비교가 같은 값을 봐야 한다. 따로 읽으면 그 사이의 전이 때문에
+		// 둘 다 빗나가서, 허용되는 상태인데도 INVALID_STATE 로 거절할 수 있다.
+		const ServerSessionState authState = session->GetServerSessionState();
+		if (authState != ServerSessionState::CONNECTED &&
+			authState != ServerSessionState::AUTH_PENDING)
 		{
 			SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::INVALID_STATE);
 			return SystemPacketResult::Rejected;
