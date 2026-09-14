@@ -262,6 +262,10 @@ private:
 	// 돌아온 뒤 세션 접근 금지는 ResumeReceiveIfDrained 와 같다.
 	void ResumeReceive();
 
+	// 취소가 걸린 뒤 남아 있는 일시정지의 IO 카운트를 놓는다.
+	// (왜 필요한지는 BaseSession::ReleaseUnpostedIO 주석)
+	void ReleaseUnpostedIO() override;
+
 	// InitializeMemoryPool 이 잡은 자원만 되돌린다.
 	// 그쪽의 실패 정리와 Finalize 가 함께 쓴다. 부분 생성 상태에서도 안전하다.
 	void ReleaseMemoryResources();

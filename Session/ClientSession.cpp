@@ -601,7 +601,21 @@ bool ClientSession::PostReceiveOrPause()
 	// 0 은 백프레셔를 쓰지 않는다는 뜻이다. 이 경로가 없던 때와 완전히 같다.
 	if (pauseLevel == 0 || GetJobQueueDepth() < pauseLevel)
 	{
-		return PostReceive();
+		if (PostReceive())
+			return true;
+
+		// 취소가 이미 걸려 있으면 부르는 쪽이 할 일이 없다.
+		//
+		// 아래 멈춤 경로는 이 구분을 처음부터 하고 있었다(BeginIO 가 false 면
+		// true 를 돌려준다). 이 경로만 빠져 있어서, 정리가 이미 진행 중인
+		// 세션마다 "failed to post the next recv" 를 ERROR 로 남기고 반납을
+		// 한 번 더 요청했다. 그 요청은 poolState CAS 에 걸려 "release skipped"
+		// 로 끝나므로 동작은 옳았지만, 실측 bench 1회에 252줄이 그 오탐이었다.
+		// 진짜 실패(링이 가득 참 / 접속이 끊김)가 그 안에 묻힌다.
+		//
+		// 취소가 아닌 실패는 그대로 false 다. 그때는 정말로 아무도 이 세션을
+		// 정리하고 있지 않으므로 부르는 쪽이 반납해야 한다.
+		return IsIOCancelRequested();
 	}
 
 	// --- 여기부터 멈춤 ---
@@ -695,6 +709,24 @@ void ClientSession::ResumeReceive()
 	}
 
 	// 일시정지가 들고 있던 몫. 이 줄 이후로 세션을 만지면 안 된다.
+	DecrementIO();
+}
+
+void ClientSession::ReleaseUnpostedIO()
+{
+	// 일시정지가 들고 있는 카운트를 놓는다.
+	//
+	// 정상 재개(ResumeReceive)와 같은 전이를 쓴다. 둘이 겹쳐도 CAS 를 이긴
+	// 쪽 하나만 카운트를 내리므로 두 번 내려가지 않는다. 다른 점은 수신을
+	// 다시 걸지 않는다는 것뿐이다 — 취소가 걸린 뒤라 BeginIO 가 어차피
+	// 거절한다.
+	if (::InterlockedCompareExchange(&m_recvPaused, 0, 1) != 1)
+		return;
+
+	LOGI("session %u dropping the recv pause : IO cancel is in progress, there is nothing to resume",
+		GetSessionID());
+
+	// 이 줄 이후로 세션을 만지면 안 된다. (ResumeReceive 와 같은 규칙)
 	DecrementIO();
 }
 

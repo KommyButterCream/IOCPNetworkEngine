@@ -290,6 +290,11 @@ bool BaseSession::CancelPendingIO()
 		}
 	}
 
+	// 취소가 걸렸으니, 발행 없이 들고만 있는 카운트는 여기서 놓는다.
+	// 이 함수의 마지막 줄이어야 한다 — 안에서 마지막 카운트가 내려가면
+	// 예약된 반납이 그 자리에서 끝난다.
+	ReleaseUnpostedIO();
+
 	return true;
 }
 
@@ -365,6 +370,10 @@ bool BaseSession::WaitForIOCancelComplete(const uint32_t timeout_ms)
 			LOGW("session %u IO cancel event was missed but the count is zero", GetSessionID());
 			return true;
 		}
+
+		// 게이트를 막 통과한 스레드가 취소 직후에 멈춤을 표시했을 수 있다.
+		// 그 카운트는 완료 통지가 아니라 여기서만 걷힌다.
+		ReleaseUnpostedIO();
 
 		// 낙오가 있으면 여기서 걷힌다.
 		ReissueCancelIo();
