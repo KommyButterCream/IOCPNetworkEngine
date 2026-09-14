@@ -182,6 +182,18 @@ void ReadySessionScheduler::WorkerThreadLoop(ReadySessionWorker& worker, uint32_
 				}
 			}
 		}
+
+		// 백프레셔 해제. 반드시 이 루프 본문의 마지막 줄이어야 한다.
+		//
+		// 이 안에서 일시정지가 들고 있던 IO 카운트를 내려놓는다. 그게 마지막
+		// 카운트였다면 예약된 반납이 그 자리에서 마무리되고 세션은 풀로
+		// 돌아간다. 뒤에 세션을 만지는 줄이 있으면 그게 곧 use-after-free 다.
+		//
+		// 위의 재큐잉과는 조건이 겹치지 않는다. 재개는 큐가 저수위 이하일
+		// 때만 일어나고, 재큐잉은 큐가 비어 있지 않을 때만 일어난다.
+		// (저수위가 0 이 아닌 한 둘 다 성립할 수 있는데, 그때는 재큐잉이
+		// 먼저 끝나 있으므로 순서상 문제가 없다)
+		session->ResumeReceiveIfDrained();
 	}
 
 	LOGI("worker %u leaving loop", workerIndex);

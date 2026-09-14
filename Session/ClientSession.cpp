@@ -89,6 +89,15 @@ void ClientSession::ResetSession()
 	::InterlockedExchange(&m_sending, 0);
 	::InterlockedExchange(&m_processing, 0);
 
+	// 백프레셔 상태도 지운다.
+	//
+	// 여기 도달했다는 것은 IO 카운트가 0 이라는 뜻이고, 멈춰 있는 세션은
+	// 카운트를 하나 들고 있으므로 이 값은 이미 0 이어야 한다. 그래도 지우는
+	// 이유는 다음 접속이 이 슬롯을 그대로 쓰기 때문이다 — 1 이 남아 있으면
+	// 새 접속이 첫 수신부터 "이미 멈춰 있다" 로 오해된다.
+	::InterlockedExchange(&m_recvPaused, 0);
+	::InterlockedExchange(&m_recvPauseCount, 0);
+
 	// 래치가 남아 있으면 다음 접속이 이 세션을 쓰다가, 접속을 알린 적도
 	// 없는데 종료 통지를 받는다. 정상 경로에서는 반납 직전에 이미
 	// 소비되지만 통지 배선이 없는 구성도 있어 여기서 확실히 지운다.
@@ -190,6 +199,8 @@ void ClientSession::Finalize()
 
 	::InterlockedExchange(&m_sending, 0);
 	::InterlockedExchange(&m_processing, 0);
+	::InterlockedExchange(&m_recvPaused, 0);
+	::InterlockedExchange(&m_recvPauseCount, 0);
 
 	::InterlockedExchange64(&m_lastRecvTick, 0);
 	::InterlockedExchange64(&m_lastHeartbeatTick, 0);
@@ -545,6 +556,144 @@ bool ClientSession::PostReceive()
 	//Log::log(LogLevel::LOG_INFO, "[%s] WSARecv async success : %d\n", __FUNCTION__, clientSocket_);
 
 	return true;
+}
+
+// 백프레셔의 전체 그림
+//
+//   생산자 : 수신 완료 핸들러. 패킷을 파싱해 잡 큐에 넣고, 마지막에
+//            다음 수신을 건다. 그 자리가 여기(PostReceiveOrPause)다.
+//   소비자 : 잡 워커. 큐를 드레인하고 마지막에 ResumeReceiveIfDrained 를 부른다.
+//
+// 생산자는 자기 자신을 멈출 수 있다. 수신을 걸지 않으면 커널 수신 버퍼가
+// 차고 TCP 수신 윈도가 0 으로 닫혀서 보내는 쪽이 막힌다. 우리가 아무것도
+// 하지 않는 것이 곧 제어 신호다.
+//
+// 유실 깨움
+//   이 구조의 고전적인 실패는 "생산자가 멈추기로 정한 직후, 표시하기 전에
+//   소비자가 큐를 다 비우는" 것이다. 소비자는 아직 0 인 플래그를 보고 깨울
+//   일이 없다고 판단하고, 그 뒤에 생산자가 1 을 쓴다. 그 세션은 영원히
+//   조용해진다. m_sending / m_processing 이 같은 부류의 문제를 이미 겪었다.
+//
+//   그래서 순서를 뒤집는다 — 먼저 표시하고, 그 다음에 다시 확인한다.
+//   표시 이후에 드레인이 끝나면 소비자가 플래그를 보고 깨워 준다.
+//   표시 이전에 이미 끝났다면 아래의 재확인이 잡는다. 둘 중 하나는 반드시
+//   성립하고, 둘 다 성립해도 CAS 가 하나만 고른다.
+bool ClientSession::PostReceiveOrPause()
+{
+	const uint32_t pauseLevel = m_bufferConfig.recvPauseJobDepth;
+
+	// 0 은 백프레셔를 쓰지 않는다는 뜻이다. 이 경로가 없던 때와 완전히 같다.
+	if (pauseLevel == 0 || GetJobQueueDepth() < pauseLevel)
+	{
+		return PostReceive();
+	}
+
+	// --- 여기부터 멈춤 ---
+	//
+	// 카운트를 하나 잡고 들어간다. 멈춘 세션은 미완료 I/O 가 하나도 없으므로,
+	// 이 카운트가 없으면 예약된 반납이 곧바로 마무리되어 세션이 풀로 돌아간다.
+	// 그 상태에서 워커가 재개하러 오면 남의 접속이 된 세션에 수신을 건다.
+	//
+	// 카운트를 들고 있으면 반납은 예약 상태로 머물고, 재개하는 쪽이 카운트를
+	// 내려놓는 순간 정상적으로 마무리된다.
+	if (!BeginIO())
+	{
+		// 취소가 이미 걸렸다. 수신을 걸 일도, 멈출 일도 없다.
+		// 부르는 쪽(HandleRecv)이 자기 몫의 카운트를 아직 들고 있으므로
+		// 세션이 발밑에서 사라지지는 않는다.
+		return true;
+	}
+
+	::InterlockedExchange(&m_recvPaused, 1);
+	::InterlockedIncrement(&m_recvPauseCount);
+
+	// 표시 이후의 깊이를 한 번만 읽어서 로그와 판단에 같이 쓴다.
+	//
+	// 이 읽기는 반드시 표시 뒤여야 한다. 앞에서 읽은 값을 재사용하면
+	// 재확인이 성립하지 않는다 — 표시와 드레인 완료의 순서를 가리는 것이
+	// 이 읽기의 목적이기 때문이다.
+	//
+	// 읽기 한 번에 큐 락을 한 번 잡으므로 두 번 읽지 않는다. 수위가 얕게
+	// 잡힌 설정에서는 이 경로가 초당 천 번대로 돈다.
+	const uint32_t depthAfterMark = GetJobQueueDepth();
+
+	LOGI("session %u pausing recv : job queue depth %u reached the pause level %u",
+		GetSessionID(), depthAfterMark, pauseLevel);
+
+	// 표시 이전에 워커가 큐를 다 비웠을 수 있다. 그러면 깨워 줄 사람이
+	// 없으므로 여기서 직접 재개한다. (위 "유실 깨움" 주석)
+	if (depthAfterMark > m_bufferConfig.recvResumeJobDepth)
+	{
+		// 멈춘 채로 둔다. 카운트는 재개하는 쪽이 소비한다.
+		return true;
+	}
+
+	ResumeReceive();
+
+	// 여기서 true 를 돌려주는 것은 "부르는 쪽은 세션을 반납하지 말라" 는 뜻이다.
+	//
+	// ResumeReceive 안의 PostReceive 가 실패하면 그쪽이 이미 NotifyDisconnect 로
+	// 반납을 요청했다. 게다가 그 뒤의 DecrementIO 이후로는 세션을 만질 수 없어서
+	// 실패 여부를 여기까지 들고 올라올 수도 없다. 그래서 판단을 그쪽에 맡긴다.
+	return true;
+}
+
+void ClientSession::ResumeReceiveIfDrained()
+{
+	// 대부분의 호출이 여기서 끝난다. 멈춰 있지 않으면 원자 읽기 하나가 전부다.
+	if (::InterlockedCompareExchange(&m_recvPaused, 0, 0) == 0)
+		return;
+
+	if (GetJobQueueDepth() > m_bufferConfig.recvResumeJobDepth)
+		return;
+
+	ResumeReceive();
+}
+
+void ClientSession::ResumeReceive()
+{
+	// 이 전이를 이긴 스레드 하나만 재개하고, 일시정지의 IO 카운트도 그 스레드가 갖는다.
+	if (::InterlockedCompareExchange(&m_recvPaused, 0, 1) != 1)
+		return;
+
+	const uint32_t sessionIdForLog = GetSessionID();
+
+	if (!PostReceive())
+	{
+		// 수신을 다시 걸지 못했다. 이 세션은 아무것도 받을 수 없으므로
+		// 그대로 두면 하트비트 타임아웃까지 슬롯만 차지하는 좀비가 된다.
+		//
+		// 순서는 엔진의 규칙 그대로다 — 반납을 먼저 요청하고, 카운트는
+		// 마지막에 내려놓는다. 반대로 하면 카운트가 0 이 되는 자리에서
+		// 반납이 마무리되어, 그 뒤의 요청은 이미 남의 것이 된 세션을 건드린다.
+		//
+		// 이미 반납 중인 세션이 여기 오는 것은 정상이다 (취소가 걸리면
+		// PostReceive 가 false 를 돌려준다). 그때는 poolState 의 CAS 가
+		// 중복 반납을 걸러내고 "release skipped" 만 남는다.
+		LOGI("session %u could not resume recv, requesting release", sessionIdForLog);
+		NotifyDisconnect();
+	}
+	else
+	{
+		LOGI("session %u resumed recv", sessionIdForLog);
+	}
+
+	// 일시정지가 들고 있던 몫. 이 줄 이후로 세션을 만지면 안 된다.
+	DecrementIO();
+}
+
+uint32_t ClientSession::GetRecvPauseCount() const
+{
+	const LONG count = ::InterlockedCompareExchange(
+		const_cast<volatile LONG*>(&m_recvPauseCount), 0, 0);
+
+	return (count > 0) ? static_cast<uint32_t>(count) : 0;
+}
+
+bool ClientSession::IsReceivePaused() const
+{
+	return ::InterlockedCompareExchange(
+		const_cast<volatile LONG*>(&m_recvPaused), 0, 0) == 1;
 }
 
 bool ClientSession::TrySendNext()

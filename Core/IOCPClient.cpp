@@ -745,7 +745,9 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		// 다시 다음 수신 요청
 		// 실패하면 이 세션은 pending recv 가 없는 상태로 남아 통신이 조용히 멈추므로
 		// 그대로 방치하지 않고 연결을 정리한다.
-		if (!clientSession->PostReceive())
+		// 백프레셔는 서버 쪽 HandleRecv 와 같다. (사정은 그쪽 주석)
+		// 클라이언트는 스케줄러 스레드가 하나뿐이라 소비가 더 쉽게 밀린다.
+		if (!clientSession->PostReceiveOrPause())
 		{
 			LOGE("session %u failed to post the next recv, disconnecting instead of going silent",
 				clientSession->GetSessionID());

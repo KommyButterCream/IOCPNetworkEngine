@@ -214,6 +214,14 @@ public:
 	// 합이 아니라 최댓값인 이유는 ClientSessionPool 쪽 주석 참고.
 	uint32_t GetPeakJobQueueDepth() const;
 
+	// 수신 백프레셔가 걸린 총 횟수.
+	//
+	// 잡 큐가 SessionBufferConfig::recvPauseJobDepth 에 닿아 다음 WSARecv 를
+	// 걸지 않은 횟수의 전 세션 합이다. 이 값이 0 이면 부하가 고수위까지
+	// 가지 않은 것이고, 0 이 아니면서 세션이 끊기지 않았다면 백프레셔가
+	// 의도대로 동작한 것이다 — 예전에는 그 상황에서 세션을 잃었다.
+	uint32_t GetRecvPauseCount() const;
+
 protected:
 	EngineMemoryPool* GetJobMemoryPool() const;
 	EngineMemoryPool* GetPacketMemoryPool() const;

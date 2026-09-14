@@ -1139,7 +1139,16 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		// 실패하면 이 세션은 pending recv 가 없는 상태로 남아
 		// 하트비트 타임아웃까지 슬롯만 차지하는 좀비가 된다.
 		// 그러므로 즉시 반납한다. (이전에는 로그만 남기고 방치했다)
-		if (!clientSession->PostReceive())
+		// PostReceive 가 아니라 PostReceiveOrPause 다.
+		//
+		// 잡 큐가 고수위를 넘었으면 다음 수신을 걸지 않는다. 그러면 커널
+		// 수신 버퍼가 차고 TCP 수신 윈도가 닫혀서 보내는 쪽이 스스로 막힌다.
+		// 잡 워커가 큐를 저수위 아래로 드레인하면 그쪽이 수신을 다시 건다.
+		//
+		// 이게 없으면 핸들러가 유입보다 느릴 때 할 수 있는 일이 "패킷을
+		// 버리고 세션을 끊는다" 뿐이었다. 풀 커밋 상한이 OOM 은 막지만,
+		// 상한에 닿았다는 것은 이미 그 세션을 잃었다는 뜻이다.
+		if (!clientSession->PostReceiveOrPause())
 		{
 			LOGE("session %u failed to post the next recv, releasing the session instead of leaving it idle",
 				clientSession->GetSessionID());
@@ -1778,6 +1787,11 @@ void IOCPServer::OnSessionDisconnectNotify(void* context, ClientSession* session
 uint32_t IOCPServer::GetPeakJobQueueDepth() const
 {
 	return m_sessionManager ? m_sessionManager->GetPeakJobQueueDepth() : 0;
+}
+
+uint32_t IOCPServer::GetRecvPauseCount() const
+{
+	return m_sessionManager ? m_sessionManager->GetTotalRecvPauseCount() : 0;
 }
 
 uint32_t IOCPServer::GetInUseSessionCount() const

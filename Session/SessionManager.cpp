@@ -145,6 +145,11 @@ uint32_t SessionManager::GetPeakJobQueueDepth() const
 	return m_clientSessionPool ? m_clientSessionPool->GetPeakJobQueueDepth() : 0;
 }
 
+uint32_t SessionManager::GetTotalRecvPauseCount() const
+{
+	return m_clientSessionPool ? m_clientSessionPool->GetTotalRecvPauseCount() : 0;
+}
+
 uint32_t SessionManager::GetOutstandingIOCount() const
 {
 	uint32_t total = 0;

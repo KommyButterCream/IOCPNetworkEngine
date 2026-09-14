@@ -100,6 +100,13 @@ public:
 	// 가장 밀린 세션의 잡 큐 최고 수위. 상한을 정하려면 먼저 재야 한다.
 	uint32_t GetPeakJobQueueDepth() const;
 
+	// 이 풀의 세션들에 백프레셔가 걸린 총 횟수.
+	//
+	// 최고 수위와 달리 합이다. "얼마나 깊었나" 가 아니라 "몇 번 개입했나"
+	// 라서, 어느 세션에서 났는지는 중요하지 않다. 부하를 걸었는데 이 값이
+	// 0 이면 백프레셔가 한 번도 동작하지 않은 것이다.
+	uint32_t GetTotalRecvPauseCount() const;
+
 	uint32_t GetOutstandingIOCount() const;
 
 private:

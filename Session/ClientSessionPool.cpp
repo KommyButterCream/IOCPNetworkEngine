@@ -492,6 +492,21 @@ uint32_t ClientSessionPool::GetPeakJobQueueDepth() const
 	return peak;
 }
 
+uint32_t ClientSessionPool::GetTotalRecvPauseCount() const
+{
+	if (!m_sessions)
+		return 0;
+
+	uint32_t total = 0;
+
+	for (uint32_t i = 0; i < m_capacity; ++i)
+	{
+		total += m_sessions[i].GetRecvPauseCount();
+	}
+
+	return total;
+}
+
 uint32_t ClientSessionPool::GetOutstandingIOCount() const
 {
 	if (!m_sessions)

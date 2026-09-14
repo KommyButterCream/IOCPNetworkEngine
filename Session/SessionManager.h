@@ -66,6 +66,9 @@ public:
 	// 가장 밀린 세션의 잡 큐 최고 수위.
 	uint32_t GetPeakJobQueueDepth() const;
 
+	// 백프레셔가 걸린 총 횟수 (전 세션 합).
+	uint32_t GetTotalRecvPauseCount() const;
+
 	ClientSession* AcquireClientSession();
 	void ReleaseClientSession(ISession* session);
 

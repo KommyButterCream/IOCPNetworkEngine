@@ -68,6 +68,22 @@ private:
 	volatile LONG m_sending = 0; // sending flag: 0 = not sending, 1 = sending (Interlocked)
 	volatile LONG m_processing = 0; // processing flag: 0 = idle, 1 = being processed by a worker
 
+	// 수신 백프레셔 상태. 1 이면 잡 큐가 밀려서 다음 WSARecv 를 걸지 않았다.
+	//
+	// 단순한 상태 표시가 아니라 소유권 토큰이다. m_releasePending 과 같은 방식으로
+	// 쓴다 — 1 -> 0 전이에 성공한 스레드 하나만 재개를 수행한다. 멈추는 쪽
+	// (수신 완료 핸들러)과 재개하는 쪽(잡 워커)이 동시에 "내가 할 차례" 라고
+	// 판단할 수 있어서, 둘 중 하나만 고르는 장치가 필요하다.
+	//
+	// 이 플래그가 1 인 동안 세션은 IO 카운트를 하나 들고 있다. 그게 이
+	// 설계의 핵심이다 — 멈춰 있는 세션이 회수되어 다른 접속에 재배포되는
+	// 것을 그 카운트가 막는다. 카운트의 소유권은 1 -> 0 을 이긴 스레드가
+	// 가져가고, 그 스레드가 반드시 DecrementIO 로 내려놓는다.
+	volatile LONG m_recvPaused = 0;
+
+	// 여태 백프레셔가 걸린 횟수. 진단 전용이라 정확한 순서는 필요 없다.
+	volatile LONG m_recvPauseCount = 0;
+
 	// 서비스에 접속을 알렸는가. 종료 통지의 짝을 맞추는 래치다.
 	// (MarkServiceConnectNotified / ConsumeServiceConnectNotified 주석 참고)
 	volatile LONG m_serviceConnectNotified = 0;
@@ -137,6 +153,41 @@ public:
 	uint32_t GetJobQueuePeakDepth() const;
 
 	bool PostReceive();
+
+	// --- 수신 백프레셔 ---
+	//
+	// 수신 완료 핸들러가 "다음 수신을 건다" 자리에서 PostReceive 대신 이것을
+	// 부른다. 잡 큐가 고수위를 넘었으면 수신을 걸지 않고 멈춘다. 커널 수신
+	// 버퍼가 차면 TCP 수신 윈도가 닫히고, 보내는 쪽이 스스로 막힌다.
+	//
+	//   true  : 다음 수신이 걸렸거나, 백프레셔로 의도적으로 멈췄다. 둘 다 정상.
+	//   false : 수신을 걸 수 없다. 부르는 쪽이 세션을 반납해야 한다.
+	//           (PostReceive 가 false 를 돌려주던 것과 같은 계약)
+	//
+	// 수위는 SessionBufferConfig 가 정한다. recvPauseJobDepth 가 0 이면
+	// 그냥 PostReceive 를 부르는 것과 같다.
+	//
+	// 하트비트와의 관계
+	//   멈춰 있는 동안은 수신이 없으므로 m_lastRecvTick 이 갱신되지 않는다.
+	//   멈춤이 하트비트 타임아웃(기본 15초)보다 오래 이어지면 좀비 정리가
+	//   그 세션을 걷어 간다. 그게 옳다 — 15초를 드레인하지 못하는 소비자를
+	//   기다려 주는 것은 백프레셔가 아니라 그냥 멈춘 서버다. 정상 부하에서
+	//   한 번의 멈춤은 (고수위 x 잡 1건 처리시간) 이므로 밀리초 단위다.
+	bool PostReceiveOrPause();
+
+	// 잡 워커가 드레인을 끝낸 자리에서 부른다. 멈춰 있고 큐가 저수위 아래로
+	// 내려왔으면 수신을 다시 건다. 그 외에는 아무것도 하지 않는다.
+	//
+	// 주의: 이 함수가 돌아온 뒤에는 세션을 만지면 안 된다. 재개가 일시정지의
+	// IO 카운트를 내려놓고, 그게 마지막 카운트였다면 예약된 반납이 그 자리에서
+	// 마무리되어 세션이 풀로 돌아간다. 워커 루프의 마지막 줄이어야 한다.
+	void ResumeReceiveIfDrained();
+
+	// 백프레셔가 실제로 걸렸는지 밖에서 확인하는 관측점.
+	// 이 값이 0 이면 부하를 걸었어도 수위가 고수위에 닿지 않은 것이다.
+	uint32_t GetRecvPauseCount() const;
+	bool IsReceivePaused() const;
+
 	bool TrySendNext();
 	bool PostCurrentSend();
 	bool OnSendCompleted(const DWORD bytesTransferred);
@@ -175,6 +226,13 @@ public:
 
 private:
 	bool CanSendPacket(PACKET_ID_TYPE packetId) const;
+
+	// 멈춰 뒀던 수신을 실제로 다시 건다.
+	//
+	// m_recvPaused 의 1 -> 0 전이를 이긴 스레드 하나만 본문을 수행하고,
+	// 그 스레드가 일시정지의 IO 카운트도 소비한다. 진 스레드는 즉시 돌아간다.
+	// 돌아온 뒤 세션 접근 금지는 ResumeReceiveIfDrained 와 같다.
+	void ResumeReceive();
 
 	// InitializeMemoryPool 이 잡은 자원만 되돌린다.
 	// 그쪽의 실패 정리와 Finalize 가 함께 쓴다. 부분 생성 상태에서도 안전하다.

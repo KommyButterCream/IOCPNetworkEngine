@@ -51,6 +51,37 @@ struct SessionBufferConfig
 	// 붙들고 있게 된다. 실시간성이 중요하면 얕게 잡는 편이 낫다.
 	uint32_t sendQueueDepth = BLOCK_COUNT_4K;
 
+	// --- 수신 백프레셔 수위 ---
+	//
+	// 잡 큐에는 깊이 상한이 없다. 핸들러가 유입보다 느리면 잡이 무한히
+	// 쌓이고, 잡 하나가 패킷 하나를 붙들고 있으므로 메모리도 함께 자란다.
+	// 풀 커밋 상한이 그 끝을 막지만, 상한에 닿는다는 것은 이미 패킷을
+	// 버리고 세션을 끊는다는 뜻이다. 그건 마지막 방어선이지 조절이 아니다.
+	//
+	// 조절은 그 앞단에서 한다. 잡 큐가 깊어지면 다음 WSARecv 를 걸지 않는다.
+	// 그러면 커널 수신 버퍼가 차고 TCP 수신 윈도가 닫혀서 보내는 쪽이
+	// 스스로 막힌다. 유실도 끊김도 없이 속도만 맞춰진다.
+	//
+	//   recvPauseJobDepth  : 이 깊이 이상이면 다음 수신을 걸지 않는다
+	//   recvResumeJobDepth : 이 깊이 이하로 빠지면 다시 건다
+	//
+	// 두 값을 벌려 두는 이유는 진동을 막기 위해서다. 하나의 경계만 쓰면
+	// 경계 근처에서 매 잡마다 멈춤/재개가 반복되고, 재개 한 번이 WSARecv
+	// 발행 한 번이므로 그 자체가 비용이다.
+	//
+	// 기본값의 근거 (실측, 8세션 부하, 핸들러 지연을 바꿔 가며)
+	//   지연   0us -> 최고 깊이   18
+	//   지연  10us -> 최고 깊이   25
+	//   지연  25us -> 최고 깊이 1341     <- 무릎
+	//   지연 250us -> 최고 깊이 6513
+	//   정상 운영 구간의 수위는 11~31 이었다.
+	// 재개 64 는 정상 수위의 두 배라 평상시에는 아예 닿지 않고,
+	// 멈춤 256 은 무릎 위쪽이라 "정말 밀렸을 때만" 걸린다.
+	//
+	// 0 을 주면 백프레셔를 쓰지 않는다 (예전 동작 그대로).
+	uint32_t recvPauseJobDepth = 256;
+	uint32_t recvResumeJobDepth = 64;
+
 	bool IsValid() const
 	{
 		if (maxRecvPacketSize < sizeof(PACKET_HEADER) || maxRecvPacketSize > PACKET_SIZE_LIMIT)
@@ -69,6 +100,12 @@ struct SessionBufferConfig
 		// 거듭제곱 제약은 없다. 0 만 막는다 — 한 칸도 못 담는 큐는
 		// 아무것도 보낼 수 없는 세션과 같다.
 		if (sendQueueDepth == 0)
+			return false;
+
+		// 백프레셔를 쓴다면 재개 수위가 멈춤 수위보다 낮아야 한다.
+		// 같거나 뒤집히면 이력 구간이 없어져서, 경계에서 멈춤과 재개가
+		// 매 잡마다 번갈아 일어난다. 끄려면 recvPauseJobDepth 를 0 으로 둔다.
+		if (recvPauseJobDepth != 0 && recvResumeJobDepth >= recvPauseJobDepth)
 			return false;
 
 		return true;
@@ -95,6 +132,8 @@ namespace SessionBufferPreset
 		config.recvRingSize = MEMORY_SIZE_16K;
 		config.maxSendPacketSize = PACKET_SIZE_LIMIT;
 		config.sendQueueDepth = BLOCK_COUNT_4K;
+		config.recvPauseJobDepth = 256;
+		config.recvResumeJobDepth = 64;
 		return config;
 	}
 
@@ -109,6 +148,30 @@ namespace SessionBufferPreset
 		config.recvRingSize = MEMORY_SIZE_256K;
 		config.maxSendPacketSize = MEMORY_SIZE_4K;
 		config.sendQueueDepth = BLOCK_COUNT_4K;
+
+		// 서버와 같은 값이다.
+		//
+		// 처음에는 64/16 으로 뒀다. 근거는 "붙들리는 바이트를 맞춘다" 였다 —
+		// 서버는 4KB 제어 메시지를, 클라는 64KB 데이터를 받으므로 같은 256 이
+		// 서버에선 1MB 지만 클라에선 16MB 라는 계산이었다.
+		//
+		// 실측이 그 값을 부정했다. 클라가 전력으로 왕복시킬 때 잡 큐의 최고
+		// 수위가 3회 실행에서 45 / 48 / 78 이었다. 고수위 64 는 그 정상
+		// 구간 한가운데다. 실제로 한 번은 백프레셔가 걸렸다(pause_count=1).
+		//
+		// 그건 이 값들의 설계 의도를 어긴다. 백프레셔는 정상 부하에서는
+		// 닿지 않고 소비자가 진짜로 밀렸을 때만 걸려야 한다. 정상 구간
+		// 안에 두면 평소에 수신을 멈췄다 걸었다 하면서 비용만 낸다.
+		//
+		// 메모리 계산 자체가 틀린 것은 아니지만 전제가 틀렸다. 그 계산은
+		// 모든 패킷이 최대 크기라고 가정했는데, maxRecvPacketSize 는 상한일
+		// 뿐이고 실제 트래픽은 대부분 그보다 훨씬 작다.
+		//
+		// 지연에 민감한 서비스(라이브 스트리밍 등)는 낮추는 편이 낫다.
+		// 256 x 64KB 를 다 채우면 16MB 를 들고 있게 되고, 그건 붙들린
+		// 메모리이자 그대로 지연이다. 그때는 자기 수위를 재고 정하면 된다.
+		config.recvPauseJobDepth = 256;
+		config.recvResumeJobDepth = 64;
 		return config;
 	}
 }
