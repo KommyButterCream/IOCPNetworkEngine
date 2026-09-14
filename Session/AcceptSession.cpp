@@ -47,6 +47,26 @@ void AcceptSession::ResetSession()
 	m_acceptOverlapped.Clear();
 }
 
+void AcceptSession::ResetForRepost()
+{
+	// BaseSession::ResetSession 을 부르지 않는다. (이유는 헤더 주석)
+	//
+	// m_closing 은 지운다. OnDisconnect 의 "한 번만" 게이트가 이 플래그라,
+	// 1 로 굳으면 다음 주기의 "소켓을 떼지 않고 종료한다" 진단이 영영 울리지
+	// 않는다.
+	::InterlockedExchange(&m_closing, 0);
+
+	// m_cancelIo / m_releasePending / m_ioCount 는 건드리지 않는다.
+	// accept 슬롯은 예약 반납을 쓰지 않고, 취소 플래그는 종료 절차의 것이다.
+
+	SetAcceptSessionState(AcceptSessionState::ACCEPT_READY);
+
+	// m_slotOwned 는 ResetSession 과 같은 이유로 건드리지 않는다.
+	::ZeroMemory(&m_acceptBuffer, sizeof(m_acceptBuffer));
+
+	m_acceptOverlapped.Clear();
+}
+
 void AcceptSession::Finalize()
 {
 	if (m_destroyFlag)

@@ -34,6 +34,27 @@ private:
 public:
 	bool Initialize(SESSION_ROLE sessionType, uint32_t sessionId) override;
 	void ResetSession() override;
+
+	// 완료된 AcceptEx 의 카운트를 부르는 쪽이 아직 들고 있는 상태에서
+	// 이 슬롯을 되돌린다.
+	//
+	// ResetSession 을 쓸 수 없다. 그쪽은 정리 경로용이라 "미완료 I/O 가 없다"
+	// 를 전제하고, 남아 있으면 위반을 남긴다. 그런데 완료 핸들러 안의 거절
+	// 경로(주소당 제한 / 세션 풀 고갈 / 풀 가득 참)는 방금 완료된 AcceptEx 의
+	// 몫을 함수 끝까지 들고 있어야 한다 — 그 카운트가 종료 시의 취소 대기를
+	// 막는 장벽이기 때문이다. 그래서 그 자리에서 ResetSession 을 부르면
+	// 정상적인 거절 1건마다 위반이 하나씩 쌓인다.
+	// (실측 tools/churnbp : 접속 거절 28건에 "reset while 1 IO operations are
+	//  still outstanding" 28건)
+	//
+	// 그리고 ResetSession 은 여기서 불리면 안 되는 일을 하나 더 한다 —
+	// m_cancelIo 를 0 으로 되돌린다. 종료 절차가 막 취소를 걸어 둔 슬롯에서
+	// 이게 지워지면 마지막 DecrementIO 가 완료 이벤트를 세우지 않아
+	// WaitForAllAcceptIOCancelComplete 가 10초를 태운다.
+	//
+	// 그래서 다음 걸기까지 들고 갈 이유가 없는 것만 지운다. 상태와
+	// OVERLAPPED 는 PostAccept 가 어차피 다시 세운다.
+	void ResetForRepost();
 	void Finalize() override;
 
 	bool OnAccept() override;

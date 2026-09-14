@@ -654,7 +654,9 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 				ENGINE_VIOLATION("accept session %u OnDisconnect reported failure", acceptSession->GetSessionID());
 			}
 
-			acceptSession->ResetSession();
+			// ResetSession 이 아니다. 우리 몫의 카운트를 아직 들고 있다.
+			// (사정은 AcceptSession::ResetForRepost 주석)
+			acceptSession->ResetForRepost();
 
 			const bool nextAcceptPosted = PostAccept(acceptSession);
 
@@ -706,7 +708,9 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 				ENGINE_VIOLATION("accept session %u OnDisconnect reported failure", acceptSession->GetSessionID());
 			}
 
-			acceptSession->ResetSession();
+			// ResetSession 이 아니다. 우리 몫의 카운트를 아직 들고 있다.
+			// (사정은 AcceptSession::ResetForRepost 주석)
+			acceptSession->ResetForRepost();
 
 			const bool nextAcceptPosted = PostAccept(acceptSession);
 
@@ -806,7 +810,9 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 			ENGINE_VIOLATION("accept session %u OnDisconnect reported failure", acceptSession->GetSessionID());
 		}
 
-		acceptSession->ResetSession();
+		// ResetSession 이 아니다. 우리 몫의 카운트를 아직 들고 있다.
+		// (사정은 AcceptSession::ResetForRepost 주석)
+		acceptSession->ResetForRepost();
 
 		const bool nextAcceptPosted = PostAccept(acceptSession);
 
@@ -1498,7 +1504,9 @@ bool IOCPServer::PostAccept(AcceptSession* acceptSession)
 			ENGINE_VIOLATION("accept session %u OnDisconnect reported failure", acceptSession->GetSessionID());
 		}
 
-		acceptSession->ResetSession();
+		// 부르는 쪽(HandleAccept)이 완료된 AcceptEx 의 카운트를 아직 들고 있다.
+		// (사정은 AcceptSession::ResetForRepost 주석)
+		acceptSession->ResetForRepost();
 
 		return false;
 	}
@@ -1556,7 +1564,10 @@ bool IOCPServer::PostAccept(AcceptSession* acceptSession)
 			acceptSession->SetAcceptSessionState(AcceptSessionState::ACCEPT_ABORTED);
 
 			IOCPCore::CloseSocketHandle(acceptSession->DetachSocket());
-			acceptSession->ResetSession();
+
+			// 자기 몫은 위에서 내렸지만 부르는 쪽(HandleAccept)의 몫이 남아 있다.
+			// (사정은 AcceptSession::ResetForRepost 주석)
+			acceptSession->ResetForRepost();
 
 			return false;
 		}
@@ -1599,7 +1610,10 @@ bool IOCPServer::PostAccept(AcceptSession* acceptSession)
 				acceptSession->SetAcceptSessionState(AcceptSessionState::ACCEPT_ABORTED);
 
 				IOCPCore::CloseSocketHandle(acceptSession->DetachSocket());
-				acceptSession->ResetSession();
+
+				// 자기 몫은 위에서 내렸지만 부르는 쪽의 몫이 남아 있다.
+				// (사정은 AcceptSession::ResetForRepost 주석)
+				acceptSession->ResetForRepost();
 
 				if (nError == WSAECONNRESET)
 				{
