@@ -1149,6 +1149,11 @@ EngineMemoryPool* IOCPClient::GetGeneralMemoryPool() const
 	return m_generalMemoryPool;
 }
 
+EngineMemoryPool* IOCPClient::GetSendQueueMemoryPool() const
+{
+	return m_sendQueueMemoryPool;
+}
+
 const HandlerContext& IOCPClient::GetHandlerContext() const
 {
 	return m_handlerContext;

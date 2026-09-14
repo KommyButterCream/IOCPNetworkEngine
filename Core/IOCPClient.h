@@ -177,6 +177,12 @@ public:
 	EngineMemoryPool* GetJobMemoryPool() const;
 	EngineMemoryPool* GetPacketMemoryPool() const;
 	EngineMemoryPool* GetGeneralMemoryPool() const;
+
+	// 서버 쪽 같은 이름과 대칭으로 둔다. (사정은 IOCPServer.h 주석 참고)
+	// 클라는 세션이 하나라 브로드캐스트가 없지만, 공유 송신 자체는 막혀
+	// 있지 않으므로 한쪽만 여는 편이 더 헷갈린다.
+	EngineMemoryPool* GetSendQueueMemoryPool() const;
+
 	const HandlerContext& GetHandlerContext() const;
 	ClientSession* GetClientSession() const;
 

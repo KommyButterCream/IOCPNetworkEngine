@@ -209,6 +209,15 @@ protected:
 	EngineMemoryPool* GetJobMemoryPool() const;
 	EngineMemoryPool* GetPacketMemoryPool() const;
 	EngineMemoryPool* GetGeneralMemoryPool() const;
+
+	// 송신 경로 부기용 풀. 64바이트 빈 하나를 갖고 있다.
+	//
+	// 브로드캐스트에서 SharedSendPacket 을 담을 곳이 필요해서 열었다.
+	// general 풀은 1MB 빈 하나뿐이라 작은 객체를 넣으면 OS 우회로 빠지고,
+	// packet 풀은 수신 경로와 공유하므로 여기가 맞다.
+	// (분리 이유는 m_sendQueueMemoryPool 선언부 주석 참고)
+	EngineMemoryPool* GetSendQueueMemoryPool() const;
+
 	const HandlerContext& GetHandlerContext() const;
 	virtual void* GetServiceContext();
 

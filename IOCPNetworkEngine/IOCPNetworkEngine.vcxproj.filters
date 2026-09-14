@@ -116,6 +116,9 @@
     <ClInclude Include="..\Buffer\SendPacketQueue.h">
       <Filter>Buffer</Filter>
     </ClInclude>
+    <ClInclude Include="..\Buffer\SharedSendPacket.h">
+      <Filter>Buffer</Filter>
+    </ClInclude>
     <ClInclude Include="..\Core\HeartbeatThread.h">
       <Filter>Core</Filter>
     </ClInclude>

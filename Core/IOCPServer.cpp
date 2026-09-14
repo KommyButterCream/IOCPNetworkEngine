@@ -1799,6 +1799,11 @@ EngineMemoryPool* IOCPServer::GetGeneralMemoryPool() const
 	return m_generalMemoryPool;
 }
 
+EngineMemoryPool* IOCPServer::GetSendQueueMemoryPool() const
+{
+	return m_sendQueueMemoryPool;
+}
+
 const HandlerContext& IOCPServer::GetHandlerContext() const
 {
 	return m_handlerContext;
