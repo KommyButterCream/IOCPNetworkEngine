@@ -100,7 +100,7 @@ namespace MemoryPoolDetail
 		return true;
 	}
 
-	void GlobalBlockPool::Finalize()
+	void GlobalBlockPool::Finalize(bool releaseSegments)
 	{
 		if (!m_bins)
 		{
@@ -111,15 +111,23 @@ namespace MemoryPoolDetail
 		HANDLE heap = ::GetProcessHeap();
 		const uint32_t binCount = m_table ? m_table->binCount : 0;
 
+		uint64_t keptBytes = 0;
+
 		for (uint32_t b = 0; b < binCount; ++b)
 		{
 			Bin& target = m_bins[b];
 
 			for (uint32_t s = 0; s < target.segmentCount; ++s)
 			{
-				if (target.segments[s])
+				if (!target.segments[s])
+					continue;
+
+				if (releaseSegments)
 					::VirtualFree(target.segments[s], 0, MEM_RELEASE);
 			}
+
+			if (!releaseSegments)
+				keptBytes += target.committedBytes;
 
 			if (target.segments)
 				::HeapFree(heap, 0, target.segments);
@@ -139,6 +147,13 @@ namespace MemoryPoolDetail
 		m_bins = nullptr;
 		m_table = nullptr;
 		m_initialized = false;
+
+		if (keptBytes != 0)
+		{
+			LOGE("keeping %llu bytes of segments mapped : blocks were still out when the pool "
+				"was finalized, and unmapping them would turn a late release into an access violation",
+				(unsigned long long)keptBytes);
+		}
 
 		// 세그먼트를 전부 돌려줬으므로 회계도 0 으로 되돌린다.
 		// 남겨 두면 같은 객체를 다시 Initialize 했을 때 이전 사용량이

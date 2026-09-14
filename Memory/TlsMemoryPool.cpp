@@ -178,7 +178,9 @@ void TlsMemoryPool::Finalize()
 	const LONG64 bypassAcquire = ::InterlockedCompareExchange64(&m_bypassAcquire, 0, 0);
 	const LONG64 bypassRelease = ::InterlockedCompareExchange64(&m_bypassRelease, 0, 0);
 
-	if (totalAcquire != totalRelease || bypassAcquire != bypassRelease)
+	const bool blocksStillOut = (totalAcquire != totalRelease) || (bypassAcquire != bypassRelease);
+
+	if (blocksStillOut)
 	{
 		LOGE("finalize with unreleased blocks : pooled %llu outstanding, bypass %lld outstanding. see the stats above",
 			totalAcquire - totalRelease, bypassAcquire - bypassRelease);
@@ -186,7 +188,15 @@ void TlsMemoryPool::Finalize()
 	}
 
 	// 3. 세그먼트를 OS 로 반납한다.
-	m_global.Finalize();
+	//
+	// 밖에 나가 있는 블록이 남아 있으면 반납하지 않는다. 그 블록들이 얹혀
+	// 있는 주소를 커밋 해제하면, 늦게 도착한 반납이 그 주소를 읽는 순간
+	// 프로세스가 죽는다. (사정은 GlobalBlockPool::Finalize 선언부 주석)
+	//
+	// 여기서 죽으면 안 되는 이유는 이 경로가 종료 경로이기 때문이다.
+	// 이미 오류로 보고된 상태에서 크래시까지 얹으면, 원인(어느 블록이
+	// 안 돌아왔는가)이 담긴 로그를 읽을 기회마저 사라진다.
+	m_global.Finalize(!blocksStillOut);
 
 	// 같은 객체를 다시 Initialize 할 수 있으므로 우회 카운터도 되돌린다.
 	// 남겨두면 다음 수명의 Finalize 가 이전 수명의 불균형을 보고한다.

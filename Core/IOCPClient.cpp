@@ -68,13 +68,42 @@ IOCPClient::IOCPClient()
 IOCPClient::~IOCPClient()
 {
 	StopClient();
+
+	// 풀 객체를 실제로 지우는 유일한 자리다.
+	// StopClient 는 Finalize 만 한다. (이유는 ENGINE_POOL::FinalizePools 주석)
+	DestroyMemoryPools();
+}
+
+void IOCPClient::DestroyMemoryPools()
+{
+	ENGINE_POOL::EnginePools pools;
+	pools.packet = m_packetMemoryPool;
+	pools.general = m_generalMemoryPool;
+	pools.job = m_jobMemoryPool;
+	pools.sendQueue = m_sendQueueMemoryPool;
+
+	ENGINE_POOL::DestroyPools(pools);
+
+	m_packetMemoryPool = nullptr;
+	m_generalMemoryPool = nullptr;
+	m_jobMemoryPool = nullptr;
+	m_sendQueueMemoryPool = nullptr;
 }
 
 bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const SessionBufferConfig& bufferConfig, uint32_t iocpThreadCount, const EnginePoolConfig& poolConfig)
 {
-	// 종료 게이트를 초기화한다. 객체 재사용을 지원하지는 않지만(m_destroyFlag 가
-	// 되돌아가지 않는다) 플래그가 의미를 잃은 채 남아 있지 않게 한다.
+	// 지난 주기의 한 번짜리 게이트를 되돌린다.
+	//
+	// m_destroyFlag 는 StopClient 가 올리기만 하고 내리지 않았다. 그래서
+	// Start -> Stop -> Start 를 한 객체에서 하면 두 번째 StopClient 이 통째로
+	// 무시됐다 — 스케줄러 스레드도, GQCS 워커도, 세션도, 풀도 정리되지 않는다.
+	// 기동이 실패해 다시 시도하는 서비스가 그대로 이 경로를 밟는다.
+	::InterlockedExchange(&m_destroyFlag, 0);
 	::InterlockedExchange(&m_disconnecting, 0);
+
+	// 앞선 주기의 풀 객체가 남아 있으면 여기서 지운다. StopClient 는 Finalize
+	// 까지만 하고 객체를 남기기 때문이다. (이유는 ENGINE_POOL::FinalizePools 주석)
+	DestroyMemoryPools();
 
 	// 설정 오류는 아무것도 잡기 전에 걸러낸다.
 	if (!bufferConfig.IsValid())
@@ -264,31 +293,26 @@ void IOCPClient::StopClient()
 		m_session = nullptr;
 	}
 
-	if (m_jobMemoryPool)
-	{
-		delete m_jobMemoryPool;
-		m_jobMemoryPool = nullptr;
-	}
-
-	if (m_generalMemoryPool)
-	{
-		delete m_generalMemoryPool;
-		m_generalMemoryPool = nullptr;
-	}
-
-	if (m_packetMemoryPool)
-	{
-		delete m_packetMemoryPool;
-		m_packetMemoryPool = nullptr;
-	}
-
 	// 세션(m_session)을 이미 지웠으므로 엔트리는 모두 반납된 상태다.
 	if (m_sendQueueMemoryPool)
 	{
 		m_sendQueueMemoryPool->LogStats("sendQueue");
+	}
 
-		delete m_sendQueueMemoryPool;
-		m_sendQueueMemoryPool = nullptr;
+	// 재고만 돌려주고 객체는 남긴다. 늦게 도착하는 반납이 해제된 풀을
+	// 역참조하지 않도록 하기 위한 것이고, 실제 delete 는 소멸자가 한다.
+	// (사정은 ENGINE_POOL::FinalizePools 주석)
+	//
+	// 반드시 세션을 지운 뒤여야 한다. 세션 정리가 담고 있던 패킷과 송신
+	// 엔트리를 이 풀들로 되돌리기 때문이다.
+	{
+		ENGINE_POOL::EnginePools pools;
+		pools.packet = m_packetMemoryPool;
+		pools.general = m_generalMemoryPool;
+		pools.job = m_jobMemoryPool;
+		pools.sendQueue = m_sendQueueMemoryPool;
+
+		ENGINE_POOL::FinalizePools(pools);
 	}
 
 	if (m_packetHandlerTable)

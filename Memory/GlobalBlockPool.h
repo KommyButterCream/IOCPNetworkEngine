@@ -64,7 +64,23 @@ namespace MemoryPoolDetail
 		GlobalBlockPool& operator=(const GlobalBlockPool&) = delete;
 
 		bool Initialize(const BinTable& table, uint8_t ownerTag);
-		void Finalize();
+
+		// releaseSegments 가 false 면 VirtualFree 를 하지 않는다.
+		//
+		// 밖에 나가 있는 블록이 남은 채로 끝낼 때 쓴다. 세그먼트를 돌려주면
+		// 그 블록들이 얹혀 있던 주소가 커밋 해제되고, 늦게 도착한 반납이
+		// 그 주소를 읽는 순간 접근 위반으로 프로세스가 죽는다.
+		//
+		// 실측(tools/latepool 시험 2) : 브로드캐스트용 SharedSendPacket 은
+		// 서술자 자신이 송신 큐 풀의 블록이다. StopServer 뒤에 마지막 참조가
+		// 떨어지면 refCount 를 읽는 첫 줄에서 0xC0000005 로 죽었다.
+		//
+		// 이건 의도된 누수다. 그 상황은 이미 오류로 보고된 뒤이고(위쪽에서
+		// "finalize with unreleased blocks" 를 남긴다), 종료 중인 프로세스에서
+		// 페이지를 붙들고 있는 것과 죽는 것 중에는 붙들고 있는 쪽이 낫다.
+		// 장부(세그먼트 목록, 빈 배열)는 그대로 반납하므로 새는 것은
+		// 세그먼트뿐이다.
+		void Finalize(bool releaseSegments = true);
 
 		// 이 풀이 OS 에서 잡을 수 있는 총 바이트의 상한. 0 이면 무제한.
 		//

@@ -52,6 +52,15 @@ public:
 	void StopServer();
 
 private:
+	// 메모리 풀 객체를 실제로 지운다.
+	//
+	// StopServer 는 Finalize 까지만 한다. 풀 포인터가 서비스 핸들러와
+	// SharedSendPacket 으로 나가 있어서, 늦게 도착하는 반납이 해제된 객체를
+	// 만질 수 있기 때문이다. (사정은 ENGINE_POOL::FinalizePools 주석)
+	//
+	// 그래서 지우는 자리는 소멸자와, 다시 기동하기 직전 두 곳뿐이다.
+	void DestroyMemoryPools();
+
 	SOCKET m_serverSocket = INVALID_SOCKET;
 
 	SessionManager* m_sessionManager = nullptr;

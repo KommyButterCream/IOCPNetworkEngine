@@ -51,6 +51,39 @@ namespace ENGINE_POOL
 		delete pools.sendQueue; pools.sendQueue = nullptr;
 	}
 
+	// 재고만 OS 로 돌려주고 풀 객체는 남긴다.
+	//
+	// 왜 지우지 않는가
+	//   엔진은 풀 포인터를 밖으로 내보낸다. HandlerContext 에 실려 서비스
+	//   핸들러로 가고, GetPacketMemoryPool() 로도 나가고, SharedSendPacket 은
+	//   아예 그 포인터를 들고 다니며 마지막 참조가 반납을 수행한다.
+	//
+	//   그 상태에서 Stop 이 풀을 delete 하면, 늦게 도착한 반납 하나가
+	//   해제된 객체를 역참조한다. 게다가 소멸자의 Finalize 가 세그먼트를
+	//   VirtualFree 로 이미 돌려주었으므로, 반납이 블록 헤더에 쓰는 순간
+	//   커밋 해제된 주소에 쓰는 접근 위반이 된다.
+	//
+	//   "서비스가 Stop 전에 다 정리하면 된다" 로 넘길 수 없다. 브로드캐스트
+	//   팬아웃의 마지막 참조가 언제 떨어지는지는 송신 완료 시점이 정하고,
+	//   그건 종료와 경합한다. SharedSendPacket 이 서버가 아니라 풀을 직접
+	//   드는 것도 원래 이 문제를 피하려던 것이었는데, 그 풀 자체가 지워지니
+	//   의도한 보호가 성립하지 않았다.
+	//
+	// 남겨 두면 무엇이 달라지는가
+	//   TlsMemoryPool::Acquire / Release 는 맨 앞에서 m_initialized 를 본다.
+	//   Finalize 만 해 두면 늦은 반납이 그 검사에 걸려 위반 한 줄을 남기고
+	//   돌아간다. 크래시가 진단으로 바뀐다.
+	//
+	//   객체 자체는 수십 바이트다. 세그먼트는 Finalize 가 이미 전부 돌려주므로
+	//   붙들리는 메모리는 없다. 실제 delete 는 소유자의 소멸자가 한다.
+	inline void FinalizePools(EnginePools& pools)
+	{
+		if (pools.packet)    pools.packet->Finalize();
+		if (pools.general)   pools.general->Finalize();
+		if (pools.job)       pools.job->Finalize();
+		if (pools.sendQueue) pools.sendQueue->Finalize();
+	}
+
 	namespace Detail
 	{
 		// 빈 목록형 풀 하나를 만든다.

@@ -80,6 +80,10 @@ IOCPServer::IOCPServer()
 IOCPServer::~IOCPServer()
 {
 	StopServer();
+
+	// 풀 객체를 실제로 지우는 유일한 자리다.
+	// StopServer 는 Finalize 만 한다. (이유는 ENGINE_POOL::FinalizePools 주석)
+	DestroyMemoryPools();
 }
 
 bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount, const SessionBufferConfig& bufferConfig, const ConnectionPolicyConfig& policyConfig, const EnginePoolConfig& poolConfig)
@@ -104,6 +108,15 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 	}
 
 	m_connectionPolicy = policyConfig;
+
+	// 지난 주기의 한 번짜리 래치를 되돌린다.
+	//
+	// StopServer 가 올리기만 하고 내리지 않는 값들이다. 그대로 두면 다시
+	// 기동한 서버가 첫 AcceptEx 부터 "종료 중" 으로 판단해 접속을 하나도
+	// 받지 못한다. 기동이 한 번 실패해 다시 시도하는 서비스가 이 경로를 밟는다.
+	::InterlockedExchange(&m_serverShutdownRequested, FALSE);
+	::InterlockedExchange(&m_acceptStarvationReported, FALSE);
+	::InterlockedExchange(&m_postedAcceptCount, 0);
 
 	LOGI("connection policy : service capacity %u (0 = pool capacity %u), max per address %u (0 = unlimited)",
 		m_connectionPolicy.serviceCapacity, maxConnectionCount, m_connectionPolicy.maxConnectionsPerAddress);
@@ -143,6 +156,11 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 	//
 	// 만들기는 전부 성공하거나 전부 지워진다. 예전에는 실패 지점마다 이미
 	// 만든 풀이 그대로 남은 채 false 만 돌아갔다.
+
+	// 앞선 주기의 풀 객체가 남아 있으면 여기서 지운다. StopServer 는 Finalize
+	// 까지만 하고 객체를 남기기 때문이다. (이유는 ENGINE_POOL::FinalizePools 주석)
+	DestroyMemoryPools();
+
 	ENGINE_POOL::EnginePools pools;
 	if (!ENGINE_POOL::CreatePools(poolConfig, bufferConfig.maxRecvPacketSize, "server", pools))
 	{
@@ -364,31 +382,40 @@ void IOCPServer::StopServer()
 	if (m_generalMemoryPool)   m_generalMemoryPool->LogStats("general");
 	if (m_sendQueueMemoryPool) m_sendQueueMemoryPool->LogStats("sendQueue");
 
-	if (m_sendQueueMemoryPool)
+	// 재고만 돌려주고 객체는 남긴다. 늦게 도착하는 반납이 해제된 풀을
+	// 역참조하지 않도록 하기 위한 것이고, 실제 delete 는 소멸자가 한다.
+	// (사정은 ENGINE_POOL::FinalizePools 주석)
+	//
+	// 반드시 세션 매니저를 지운 뒤여야 한다. 세션 정리가 담고 있던 패킷과
+	// 송신 엔트리를 이 풀들로 되돌리기 때문이다.
 	{
-		delete m_sendQueueMemoryPool;
-		m_sendQueueMemoryPool = nullptr;
-	}
+		ENGINE_POOL::EnginePools pools;
+		pools.packet = m_packetMemoryPool;
+		pools.general = m_generalMemoryPool;
+		pools.job = m_jobMemoryPool;
+		pools.sendQueue = m_sendQueueMemoryPool;
 
-	if (m_jobMemoryPool)
-	{
-		delete m_jobMemoryPool;
-		m_jobMemoryPool = nullptr;
-	}
-
-	if (m_packetMemoryPool)
-	{
-		delete m_packetMemoryPool;
-		m_packetMemoryPool = nullptr;
-	}
-
-	if (m_generalMemoryPool)
-	{
-		delete m_generalMemoryPool;
-		m_generalMemoryPool = nullptr;
+		ENGINE_POOL::FinalizePools(pools);
 	}
 
 	Logger::Flush();
+}
+
+// 풀 객체를 실제로 지운다. 소멸자와, 재기동 직전에만 부른다.
+void IOCPServer::DestroyMemoryPools()
+{
+	ENGINE_POOL::EnginePools pools;
+	pools.packet = m_packetMemoryPool;
+	pools.general = m_generalMemoryPool;
+	pools.job = m_jobMemoryPool;
+	pools.sendQueue = m_sendQueueMemoryPool;
+
+	ENGINE_POOL::DestroyPools(pools);
+
+	m_packetMemoryPool = nullptr;
+	m_generalMemoryPool = nullptr;
+	m_jobMemoryPool = nullptr;
+	m_sendQueueMemoryPool = nullptr;
 }
 
 void IOCPServer::HandleCompletion(

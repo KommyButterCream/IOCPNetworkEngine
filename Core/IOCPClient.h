@@ -70,6 +70,14 @@ public:
 	void StopClient();
 
 private:
+	// 메모리 풀 객체를 실제로 지운다.
+	//
+	// StopClient 는 Finalize 까지만 한다. 풀 포인터가 서비스 핸들러
+	// (HandlerContext)와 GetPacketMemoryPool() 로 나가 있어서, 늦게 도착하는
+	// 반납이 해제된 객체를 만질 수 있기 때문이다.
+	// (사정은 ENGINE_POOL::FinalizePools 주석)
+	void DestroyMemoryPools();
+
 	// Destory Flag
 	LONG m_destroyFlag = 0;
 

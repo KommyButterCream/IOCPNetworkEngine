@@ -51,6 +51,17 @@ IOCPCore::~IOCPCore()
 
 bool IOCPCore::Start()
 {
+	// 종료 게이트를 되돌린다.
+	//
+	// Stop 은 이 플래그를 1 로 올리고 다시는 내리지 않았다. 그래서
+	// Start -> Stop -> Start 를 한 객체에서 하면 두 번째 Stop 이 통째로
+	// 무시됐다 — GQCS 워커를 조인하지 않고, IOCP 핸들도 소켓도 닫지 않는다.
+	// 기동이 실패해 다시 시도하는 서비스(포트가 잠깐 잡혀 있던 경우 등)가
+	// 그대로 이 경로를 밟는다.
+	//
+	// 여기서 되돌리면 두 번째 주기가 자기 자원을 정상적으로 정리한다.
+	::InterlockedExchange(&m_destroyFlag, 0);
+
 	if (!InitializeWinsock())
 	{
 		return false;
@@ -358,12 +369,22 @@ void IOCPCore::IOCPWorkerThreadLoop(IOCPWorkerThread& worker, uint32_t workerInd
 			break;
 		}
 
-		if (worker.IsStopRequested())
-		{
-			LOGI("GQCS worker %u observed a stop request", workerIndex);
-			break;
-		}
-
+		// 여기 있던 "정지 요청이면 그냥 나간다" 검사를 뺐다.
+		//
+		// 이미 큐에서 꺼낸 완료 통지를 처리하지 않고 나가면, 그 I/O 의
+		// DecrementIO 가 영영 실행되지 않는다. 세션은 카운트가 0 이 아닌 채로
+		// 정리되고 "finalized while N IO operations are still outstanding" 이 남는다.
+		// 실측(예전 bench 로그) : 버려진 통지 수와 그 위반 수가 8:9, 9:10, 6:7,
+		// 12:13 으로 나란히 움직였다 — 버린 통지가 그대로 그 위반이었다.
+		//
+		// 막 꺼낸 통지는 처리하는 편이 낫다. 그래야 회계가 맞고, 이 검사가
+		// 없어도 루프 머리의 같은 검사가 다음 바퀴에서 내보낸다. GQCS 의 무한
+		// 대기를 깨우는 것은 이 검사가 아니라 RequestIOCPThreadTerminate 가 넣는
+		// 종료 코드다.
+		//
+		// 이 워커가 종료 코드를 소비하지 않고 나가도 괜찮다. 코드는 워커 수만큼
+		// 들어가 있고 한 워커는 많아야 하나를 소비하므로, 대기 중인 워커의 몫은
+		// 언제나 남는다.
 		HandleCompletion(completionKey, overlapped, bytesTransferred, completionStatus);
 	}
 
