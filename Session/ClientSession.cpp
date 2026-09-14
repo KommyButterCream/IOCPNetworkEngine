@@ -98,6 +98,14 @@ void ClientSession::ResetSession()
 	::InterlockedExchange(&m_recvPaused, 0);
 	::InterlockedExchange(&m_recvPauseCount, 0);
 
+	// 거부 로그 억제 상태도 지운다. 남겨 두면 다음 접속의 첫 거부가
+	// 지난 접속의 창에 걸려 조용히 삼켜진다.
+	for (uint32_t i = 0; i < static_cast<uint32_t>(SendRejectReason::Count); ++i)
+	{
+		::InterlockedExchange64(&m_sendRejectLogTick[i], 0);
+		::InterlockedExchange(&m_sendRejectSuppressed[i], 0);
+	}
+
 	// 래치가 남아 있으면 다음 접속이 이 세션을 쓰다가, 접속을 알린 적도
 	// 없는데 종료 통지를 받는다. 정상 경로에서는 반납 직전에 이미
 	// 소비되지만 통지 배선이 없는 구성도 있어 여기서 확실히 지운다.
@@ -201,6 +209,14 @@ void ClientSession::Finalize()
 	::InterlockedExchange(&m_processing, 0);
 	::InterlockedExchange(&m_recvPaused, 0);
 	::InterlockedExchange(&m_recvPauseCount, 0);
+
+	// 거부 로그 억제 상태도 지운다. 남겨 두면 다음 접속의 첫 거부가
+	// 지난 접속의 창에 걸려 조용히 삼켜진다.
+	for (uint32_t i = 0; i < static_cast<uint32_t>(SendRejectReason::Count); ++i)
+	{
+		::InterlockedExchange64(&m_sendRejectLogTick[i], 0);
+		::InterlockedExchange(&m_sendRejectSuppressed[i], 0);
+	}
 
 	::InterlockedExchange64(&m_lastRecvTick, 0);
 	::InterlockedExchange64(&m_lastHeartbeatTick, 0);
@@ -918,6 +934,44 @@ bool ClientSession::SubmitJob(Job* job)
 	return EnqueueJob(job, wasEmpty);
 }
 
+// 이유별로 1초에 한 줄만 통과시킨다. 자세한 사정은 헤더의 선언 주석 참고.
+//
+// 세지 못하고 놓치는 경우가 있어도 괜찮다. 이건 회계가 아니라 "얼마나 자주
+// 거부되고 있는가" 를 읽는 사람에게 알려 주는 수치라, 창 경계에서 한두 건이
+// 어긋나는 것보다 로그 양에 상한이 있는 것이 중요하다.
+bool ClientSession::ShouldLogSendReject(SendRejectReason reason, uint32_t& outSuppressed)
+{
+	outSuppressed = 0;
+
+	const uint32_t index = static_cast<uint32_t>(reason);
+	if (index >= static_cast<uint32_t>(SendRejectReason::Count))
+		return true;
+
+	constexpr LONGLONG WindowMs = 1000;
+
+	const LONGLONG now = static_cast<LONGLONG>(::GetTickCount64());
+	const LONGLONG last = ::InterlockedCompareExchange64(&m_sendRejectLogTick[index], 0, 0);
+
+	// 창이 아직 안 지났다. 삼키고 세기만 한다.
+	if (last != 0 && (now - last) < WindowMs)
+	{
+		::InterlockedIncrement(&m_sendRejectSuppressed[index]);
+		return false;
+	}
+
+	// 창을 여는 것은 한 스레드뿐이다. 진 쪽은 삼킨다.
+	if (::InterlockedCompareExchange64(&m_sendRejectLogTick[index], now, last) != last)
+	{
+		::InterlockedIncrement(&m_sendRejectSuppressed[index]);
+		return false;
+	}
+
+	outSuppressed = static_cast<uint32_t>(
+		::InterlockedExchange(&m_sendRejectSuppressed[index], 0));
+
+	return true;
+}
+
 bool ClientSession::EnqueueSendPacket(void** packetData, uint32_t packetSize)
 {
 	if (packetData == nullptr || packetSize <= 0 || GetSendPacketQueue() == nullptr)
@@ -948,7 +1002,13 @@ bool ClientSession::EnqueueSendPacket(void** packetData, uint32_t packetSize)
 
 	if (!CanSendPacket(packetHeader->packetId))
 	{
-		LOGW("session %u packet send blocked before session established (PacketID : %u)", GetSessionID(), packetHeader->packetId);
+		uint32_t suppressed = 0;
+		if (ShouldLogSendReject(SendRejectReason::NotEstablished, suppressed))
+		{
+			LOGW("session %u packet send blocked before session established "
+				"(PacketID : %u, %u more suppressed in the last second)",
+				GetSessionID(), packetHeader->packetId, suppressed);
+		}
 		return false;
 	}
 
@@ -961,7 +1021,13 @@ bool ClientSession::EnqueueSendPacket(void** packetData, uint32_t packetSize)
 		//
 		// 실패 시 Enqueue 는 *packetData 를 nullptr 로 만들지 않으므로
 		// 패킷 메모리의 소유권은 호출자가 계속 보유한다. 호출자가 해제해야 한다.
-		LOGW("session %u send queue full, packet dropped (PacketID : %u, Size : %u)", GetSessionID(), packetHeader->packetId, packetSize);
+		uint32_t suppressed = 0;
+		if (ShouldLogSendReject(SendRejectReason::SendQueueFull, suppressed))
+		{
+			LOGW("session %u send queue full, packet dropped "
+				"(PacketID : %u, Size : %u, %u more suppressed in the last second)",
+				GetSessionID(), packetHeader->packetId, packetSize, suppressed);
+		}
 		return false;
 	}
 
@@ -1000,13 +1066,24 @@ bool ClientSession::EnqueueSharedSendPacket(const void* packetData, uint32_t pac
 
 	if (!CanSendPacket(packetHeader->packetId))
 	{
-		LOGW("session %u packet send blocked before session established (PacketID : %u)", GetSessionID(), packetHeader->packetId);
+		uint32_t suppressed = 0;
+		if (ShouldLogSendReject(SendRejectReason::NotEstablished, suppressed))
+		{
+			LOGW("session %u packet send blocked before session established "
+				"(PacketID : %u, %u more suppressed in the last second)",
+				GetSessionID(), packetHeader->packetId, suppressed);
+		}
 		return false;
 	}
 
 	if (!GetSendPacketQueue()->EnqueueShared(packetData, packetSize, releaseFunc, releaseContext))
 	{
-		LOGW("session %u failed to enqueue shared SendPacket", GetSessionID());
+		uint32_t suppressed = 0;
+		if (ShouldLogSendReject(SendRejectReason::SendQueueFull, suppressed))
+		{
+			LOGW("session %u failed to enqueue a shared send packet "
+				"(%u more suppressed in the last second)", GetSessionID(), suppressed);
+		}
 		return false;
 	}
 

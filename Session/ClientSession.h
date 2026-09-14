@@ -227,6 +227,34 @@ public:
 private:
 	bool CanSendPacket(PACKET_ID_TYPE packetId) const;
 
+	// --- 송신 거부 로그의 발생 억제 ---
+	//
+	// EnqueueSendPacket 의 거부 두 가지(인증 전 송신, 송신 큐 포화)는
+	// 호출부가 얼마나 자주 부르는지에 따라 빈도가 정해진다. 그런데 거부를
+	// 만난 호출부가 재시도 루프를 도는 것은 지극히 자연스러운 형태다 —
+	// 그러면 거부 1건이 로그 수억 줄이 된다.
+	//
+	// 실측: 세션이 established 에 도달하지 못한 실행에서 하네스가 재시도를
+	// 돌자 337초 만에 로그가 41GB 까지 자랐다. 디스크가 찰 때까지 멈추지
+	// 않는다. 엔진이 호출부의 루프를 디스크 고갈로 바꾼 셈이다.
+	//
+	// 그래서 이유별로 1초에 한 줄만 남기고, 그 사이 억제된 횟수를 다음 줄에
+	// 실어 보낸다. 정보는 유지되고 양은 상한이 생긴다.
+	// (같은 판단이 EngineMemoryPoolHelper.h 에도 적혀 있다 — 패킷당 호출되는
+	//  경로에 로그를 남기면 그것만으로 처리량이 한 자리 수로 떨어진다)
+	enum class SendRejectReason : uint32_t
+	{
+		NotEstablished = 0,
+		SendQueueFull = 1,
+		Count
+	};
+
+	// true 면 지금 한 줄 남겨도 된다. outSuppressed 는 직전 창에서 삼킨 횟수다.
+	bool ShouldLogSendReject(SendRejectReason reason, uint32_t& outSuppressed);
+
+	volatile LONGLONG m_sendRejectLogTick[static_cast<uint32_t>(SendRejectReason::Count)] = {};
+	volatile LONG     m_sendRejectSuppressed[static_cast<uint32_t>(SendRejectReason::Count)] = {};
+
 	// 멈춰 뒀던 수신을 실제로 다시 건다.
 	//
 	// m_recvPaused 의 1 -> 0 전이를 이긴 스레드 하나만 본문을 수행하고,
