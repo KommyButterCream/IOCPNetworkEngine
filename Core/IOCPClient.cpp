@@ -1229,7 +1229,40 @@ bool IOCPClient::HandleSystemPacket(ClientSession* session, uint16_t packetId, c
 		}
 
 		const SC_SYSTEM_HEARTBEAT_REQUEST_PACKET* request = reinterpret_cast<const SC_SYSTEM_HEARTBEAT_REQUEST_PACKET*>(packetData);
-		return session->SendSystemHeartbeatResponse(request->tick);
+
+		// 응답을 보내지 못해도 연결을 끊지 않는다.
+		//
+		// 예전에는 이 함수의 반환값을 그대로 돌려줬고, 호출부(HandleRecv)는
+		// false 를 "엔진 패킷 처리 실패" 로 보고 연결을 정리했다. 그런데
+		// SendSystemHeartbeatResponse 가 false 를 내는 남은 이유는 전부
+		// 일시적인 혼잡이다 — 송신 큐 포화, 패킷 풀 일시 고갈. (역할과
+		// established 는 바로 위에서 이미 확인했다)
+		//
+		// 즉 "지금 이 순간 보낼 자리가 없다" 를 프로토콜 위반으로 처리하고
+		// 있었다. 송신 큐가 가득 차면 즉시 false 를 돌려주는 것은 이 엔진의
+		// 설계된 동작인데(대기하지 않고 호출부에 정책을 맡긴다), 정작 엔진
+		// 자신이 그걸 치명으로 받았다.
+		//
+		// 실측: 클라가 전력으로 송신하면 송신 큐(기본 깊이 4096)가 계속
+		// 차 있다. 그 상태에서 서버 하트비트(5초 주기)가 도착하면 응답을
+		// 큐에 넣지 못하고, 클라가 스스로 끊는다. 그러면 읽지 않은 데이터를
+		// 안은 채 소켓이 닫히므로 RST 가 나가고, 서버의 걸려 있던 WSASend 가
+		// 10054 로 실패해 서버도 그 세션을 정리한다. 6초 부하에서 클라 4대 중
+		// 3대가 정확히 t=5.0s(하트비트 주기)에 함께 사라졌다.
+		//
+		// 응답 한 번을 놓치는 것은 안전하다. 생존 판정은 서버의 하트비트
+		// 타임아웃(기본 15초)이 하고, 그 기준은 max(마지막 수신, 마지막
+		// 하트비트) 다. 클라가 데이터를 보내고 있으면 수신 시각이 계속
+		// 갱신되므로 타임아웃이 돌지 않는다 — 실제로 살아 있으니 맞는 판정이다.
+		// 반대로 정말 조용해지면 그때는 타임아웃이 제 몫을 한다.
+		if (!session->SendSystemHeartbeatResponse(request->tick))
+		{
+			LOGW("session %u could not queue the heartbeat response (the send queue is likely full). "
+				"keeping the connection : liveness is decided by the server's heartbeat timeout",
+				session->GetSessionID());
+		}
+
+		return true;
 	}
 
 	default:
