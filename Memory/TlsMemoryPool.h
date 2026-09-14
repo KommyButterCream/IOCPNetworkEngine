@@ -104,6 +104,35 @@ public:
 	void* Acquire(size_t size);
 	void  Release(const void* payload);
 
+	// --- 커밋 상한 ---
+	//
+	// 이 풀이 OS 에서 잡을 수 있는 총 바이트. 0 이면 무제한(기본값, 기존 동작).
+	//
+	// 상한이 없으면 재고가 마를 때마다 세그먼트를 새로 잡는다. 거부당하는
+	// 조건은 OS 가 메모리를 못 주는 것뿐이라, 소비자가 생산자보다 느리면
+	// 프로세스가 OOM 까지 간다. 잡 큐에 깊이 상한이 없으므로 그 상황은
+    // 실제로 만들어진다 — 실측(bench, 느린 핸들러)에서 세션 하나가 150ms 에
+	// 잡 6513개를 쌓았고, 그 속도면 초당 약 2.8MB 다.
+	//
+	// 상한에 걸리면 확장을 거부하고 Acquire 가 nullptr 을 돌려준다. 그 실패는
+	// 이미 끝까지 처리되어 있다 — 잡 할당 실패는 패킷을 버리고, 패킷 할당
+	// 실패는 그 세션을 정리한다. 새 경로가 생기는 것이 아니라 죽는 대신
+	// 실패하게 된다.
+	//
+	// 초기 Initialize 의 선할당은 상한과 무관하게 통과한다. 설정이 상한보다
+	// 크면 그건 설정 오류이고 기동 시점에 드러나야 한다.
+	//
+	// StartServer / StartClient 가 풀을 만든 직후에 걸면 된다.
+	void SetCommitLimit(uint64_t maxCommittedBytes);
+	uint64_t GetCommitLimit() const;
+
+	// 지금 잡고 있는 총 바이트. 운영 지표다.
+	uint64_t GetCommittedBytes() const;
+
+	// 상한에 걸려 확장을 거부한 횟수. 0 이 아니면 상한이 실제로 물렸다는
+	// 뜻이고, 그때부터 할당 실패가 나기 시작한다.
+	uint64_t GetCommitLimitHitCount() const;
+
 	uint32_t GetBinCount() const { return m_table.binCount; }
 	bool GetBinStats(uint32_t bin, BinStats& outStats) const;
 	void LogStats(const char* poolName) const;

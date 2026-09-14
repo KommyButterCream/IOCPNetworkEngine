@@ -201,6 +201,26 @@ void TlsMemoryPool::Finalize()
 // 할당 / 해제
 // ---------------------------------------------------------------------------
 
+void TlsMemoryPool::SetCommitLimit(uint64_t maxCommittedBytes)
+{
+	m_global.SetCommitLimit(maxCommittedBytes);
+}
+
+uint64_t TlsMemoryPool::GetCommitLimit() const
+{
+	return m_global.GetCommitLimit();
+}
+
+uint64_t TlsMemoryPool::GetCommittedBytes() const
+{
+	return m_global.GetCommittedBytes();
+}
+
+uint64_t TlsMemoryPool::GetCommitLimitHitCount() const
+{
+	return m_global.GetCommitLimitHitCount();
+}
+
 void* TlsMemoryPool::Acquire(size_t size)
 {
 	if (!m_initialized || size == 0)

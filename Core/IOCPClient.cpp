@@ -161,6 +161,9 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		return false;
 	}
 
+	// 폭주 차단기. 정상 운영이라면 닿지 않는 값이다. (PreDefine.h 주석 참고)
+	m_jobMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_JOB);
+
 	// 마지막 빈이 64K 인 이유.
 	//
 	// 클라 프리셋은 maxRecvPacketSize 를 PACKET_SIZE_LIMIT(65535) 로 둔다.
@@ -203,6 +206,8 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		return false;
 	}
 
+	m_packetMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_PACKET);
+
 	// 풀이 설정된 수신 상한을 실제로 덮는지 확인한다.
 	//
 	// 위의 빈 목록과 bufferConfig 는 서로 다른 곳에서 정해지므로 언제든 다시
@@ -233,6 +238,8 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		return false;
 	}
 
+	m_generalMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_GENERAL);
+
 	// 송신 큐 엔트리 풀. 구성은 서버와 같다 (IOCPServer::StartServer 참고).
 	//
 	// 예전에는 같은 총량을 샤드 1개로 만들었다. 세션이 하나뿐이라 샤딩이
@@ -250,6 +257,8 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		LOGE("failed to initialize the send queue memory pool");
 		return false;
 	}
+
+	m_sendQueueMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_SENDQUEUE);
 
 	m_handlerContext.jobMemoryPool = GetJobMemoryPool();
 	m_handlerContext.packetMemoryPool = GetPacketMemoryPool();

@@ -66,6 +66,35 @@ namespace MemoryPoolDetail
 		bool Initialize(const BinTable& table, uint8_t ownerTag);
 		void Finalize();
 
+		// 이 풀이 OS 에서 잡을 수 있는 총 바이트의 상한. 0 이면 무제한.
+		//
+		// 상한이 없으면 GrowLocked 이 VirtualAlloc 을 거부당할 때까지 세그먼트를
+		// 계속 늘린다. 잡 큐에 깊이 상한이 없으므로(실측: 느린 핸들러에서
+		// 세션 하나가 150ms 에 6513개, 초당 약 2.8MB) 느린 핸들러 하나가
+		// 프로세스를 OOM 까지 끌고 갈 수 있다.
+		//
+		// 상한에 걸리면 확장을 거부하고 Acquire 가 nullptr 을 반환한다.
+		// 그 경로는 이미 끝까지 구현되어 있다 —
+		// CreateJob 실패는 SubmitPacketJob 이 패킷을 버리고 false 를 돌려주고,
+		// CreatePacket 실패는 ReadPacket 이 OutOfMemory 를 반환해 세션을 정리한다.
+		// 새 실패 경로가 생기는 것이 아니라, 죽는 대신 실패하게 된다.
+		//
+		// 빈별이 아니라 풀별인 이유는, 운영자가 통제하고 싶은 것이 "이 풀이
+		// 쓰는 메모리" 이지 "4K 빈이 쓰는 메모리" 가 아니기 때문이다.
+		// 빈별로 두면 한쪽은 남는데 다른 쪽이 말라 실패하는 상황을 튜닝으로만
+		// 피해야 한다.
+		//
+		// 초기 Preallocate 은 이 상한을 넘더라도 통과시킨다. 설정이 상한보다
+		// 크면 기동 시점에 알아야지, 나중에 조용히 마르면 안 된다.
+		void SetCommitLimit(uint64_t maxCommittedBytes);
+		uint64_t GetCommitLimit() const;
+
+		// 지금 이 풀이 OS 에서 잡고 있는 총 바이트. 모든 빈의 합이다.
+		uint64_t GetCommittedBytes() const;
+
+		// 상한에 걸려 확장을 거부한 횟수. 0 이 아니면 상한이 실제로 물렸다는 뜻이다.
+		uint64_t GetCommitLimitHitCount() const;
+
 		// 설정에 적힌 만큼 미리 만들어 둔다. 세그먼트 최소 크기 때문에
 		// 요청보다 많이 만들어질 수 있다.
 		bool Preallocate(uint32_t bin, uint32_t blocks);
@@ -96,5 +125,12 @@ namespace MemoryPoolDetail
 		void* m_binsRaw = nullptr;      // m_bins 의 정렬 전 원본 포인터
 		uint8_t m_ownerTag = POOL_ID_NONE;
 		bool m_initialized = false;
+
+		// 풀 전체의 커밋 회계. 빈별 committedBytes 의 합과 같아야 한다.
+		// 확장은 growLock 안에서만 일어나므로 갱신은 그 락이 지킨다.
+		// 읽기는 락 밖에서도 오므로 Interlocked 로 읽는다.
+		volatile LONG64 m_committedBytes = 0;
+		volatile LONG64 m_commitLimitHits = 0;
+		uint64_t m_maxCommittedBytes = 0;   // 0 = 무제한
 	};
 }

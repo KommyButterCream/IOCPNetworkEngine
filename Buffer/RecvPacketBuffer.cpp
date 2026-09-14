@@ -239,7 +239,22 @@ PacketReadResult RecvPacketBuffer::ReadPacket(char*& outBuffer, uint32_t& outSiz
 	if (!packetMemory)
 	{
 		// 패킷 풀에서 메모리를 못 얻었다. 구체적 원인은 EngineMemoryPool 이 남긴다.
-		ENGINE_VIOLATION("failed to acquire %u bytes for an incoming packet, dropping it", header.packetSize);
+		//
+		// 위반이 아니라 오류로 남긴다.
+		//
+		// 예전에는 ENGINE_VIOLATION 이었다. 그때는 여기 오는 유일한 길이
+		// "OS 가 메모리를 거부했다" 여서 예외적 상황이 맞았다. 이제는 풀에
+		// 커밋 상한이 있고, 상한에 걸려 확장을 거부하는 것은 설계된 동작이다 —
+		// 소비자가 생산자보다 느릴 때 프로세스가 죽는 대신 패킷을 버리게
+		// 하려고 넣은 장치다.
+		//
+		// 그걸 위반으로 세면, 백프레셔가 제대로 동작하는 실행이 곧 "위반이
+		// 쏟아진 실행" 이 되어 계수기의 의미가 사라진다. 실측: 상한을 낮게
+		// 걸고 폭주시키자 위반 53건이 전부 이 경로였다.
+		//
+		// 호출부가 OutOfMemory 를 보고 세션을 정리하므로 정보는 이미 전달된다.
+		LOGE("failed to acquire %u bytes for an incoming packet, dropping the session",
+			header.packetSize);
 		return PacketReadResult::OutOfMemory;
 	}
 

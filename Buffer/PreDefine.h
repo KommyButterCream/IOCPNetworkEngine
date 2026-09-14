@@ -51,4 +51,24 @@ constexpr static uint32_t PACKET_SIZE_LIMIT = 65535;
 // 총량을 샤드로 쪼개 세션 아이디로 고정 배정했으므로, 이 값을 늘리는 것
 // 말고는 한 세션의 송신 상한을 올릴 방법이 없었다.
 constexpr static uint32_t SEND_QUEUE_ENTRY_COUNT = BLOCK_COUNT_64K;
+
+// 풀별 커밋 상한의 기본값.
+//
+// 상한이 없으면 재고가 마를 때마다 세그먼트를 새로 잡고, 거부당하는 조건은
+// OS 가 메모리를 못 주는 것뿐이다. 잡 큐에 깊이 상한이 없으므로 소비자가
+// 느려지면 그대로 OOM 까지 간다.
+//
+// 이 값들은 "정상 운영이라면 절대 닿지 않는 곳" 에 둔다. 튜닝 손잡이가
+// 아니라 폭주 차단기다. 실측 기준선(bench, 8세션 부하)은 이렇다.
+//   packet   32.5MB 커밋 (10~11개 빈 선할당)
+//   job       2.2MB
+//   sendQueue 5.0MB
+// 선할당의 8~16배를 상한으로 잡으면, 정상 버스트로는 닿지 않고 폭주는 막힌다.
+//
+// 서비스가 더 필요하면 StartServer 뒤에 SetCommitLimit 으로 올리면 된다.
+// 0 을 주면 예전처럼 무제한이다.
+constexpr static uint64_t POOL_COMMIT_LIMIT_PACKET = 512ull * 1024 * 1024;  // 512MB
+constexpr static uint64_t POOL_COMMIT_LIMIT_JOB = 64ull * 1024 * 1024;   //  64MB
+constexpr static uint64_t POOL_COMMIT_LIMIT_GENERAL = 256ull * 1024 * 1024;  // 256MB
+constexpr static uint64_t POOL_COMMIT_LIMIT_SENDQUEUE = 128ull * 1024 * 1024;  // 128MB
 constexpr static uint32_t INFERENCE_CHUNK_SIZE = MEMORY_SIZE_4K;

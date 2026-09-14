@@ -139,6 +139,12 @@ namespace MemoryPoolDetail
 		m_bins = nullptr;
 		m_table = nullptr;
 		m_initialized = false;
+
+		// 세그먼트를 전부 돌려줬으므로 회계도 0 으로 되돌린다.
+		// 남겨 두면 같은 객체를 다시 Initialize 했을 때 이전 사용량이
+		// 상한에 그대로 얹힌다.
+		::InterlockedExchange64(&m_committedBytes, 0);
+		::InterlockedExchange64(&m_commitLimitHits, 0);
 	}
 
 	bool GlobalBlockPool::Preallocate(uint32_t bin, uint32_t blocks)
@@ -262,6 +268,11 @@ namespace MemoryPoolDetail
 		// 다른 카운터들과 같은 방식으로 맞춘다.
 		::InterlockedExchangeAdd64(&target.committedBytes, static_cast<LONG64>(bytes));
 
+		// 풀 전체 합계. 상한 검사가 이 값을 본다.
+		// 세그먼트를 실제로 확보한 뒤에 올린다 — 먼저 올리면 실패했을 때
+		// 되돌려야 하고, 그 사이 다른 빈의 검사가 잘못된 값을 본다.
+		::InterlockedExchangeAdd64(&m_committedBytes, static_cast<LONG64>(bytes));
+
 		return true;
 	}
 
@@ -305,6 +316,28 @@ namespace MemoryPoolDetail
 		}
 	}
 
+	void GlobalBlockPool::SetCommitLimit(uint64_t maxCommittedBytes)
+	{
+		m_maxCommittedBytes = maxCommittedBytes;
+	}
+
+	uint64_t GlobalBlockPool::GetCommitLimit() const
+	{
+		return m_maxCommittedBytes;
+	}
+
+	uint64_t GlobalBlockPool::GetCommittedBytes() const
+	{
+		return static_cast<uint64_t>(::InterlockedCompareExchange64(
+			const_cast<volatile LONG64*>(&m_committedBytes), 0, 0));
+	}
+
+	uint64_t GlobalBlockPool::GetCommitLimitHitCount() const
+	{
+		return static_cast<uint64_t>(::InterlockedCompareExchange64(
+			const_cast<volatile LONG64*>(&m_commitLimitHits), 0, 0));
+	}
+
 	bool GlobalBlockPool::GrowLocked(uint32_t bin, uint32_t minBlocks, bool isInitial)
 	{
 		Bin& target = m_bins[bin];
@@ -315,6 +348,35 @@ namespace MemoryPoolDetail
 			blocks = minBlocks;
 
 		const size_t bytes = static_cast<size_t>(spec.stride) * blocks;
+
+		// 커밋 상한. VirtualAlloc 을 부르기 전에 본다.
+		//
+		// 초기 Preallocate(isInitial)은 통과시킨다. 설정이 상한보다 크다면
+		// 그건 설정 오류이고 기동 시점에 드러나야 한다 — 여기서 막으면
+		// 서버가 블록이 모자란 채로 정상 기동한 것처럼 보인다.
+		// 막아야 하는 것은 런타임 확장이 끝없이 이어지는 쪽이다.
+		if (!isInitial && m_maxCommittedBytes != 0)
+		{
+			const uint64_t committed = static_cast<uint64_t>(
+				::InterlockedCompareExchange64(&m_committedBytes, 0, 0));
+
+			if (committed + bytes > m_maxCommittedBytes)
+			{
+				::InterlockedIncrement64(&m_commitLimitHits);
+				::InterlockedIncrement(&target.failCount);
+
+				// 이 로그가 보이면 소비자가 생산자보다 느리다는 뜻이다.
+				// 상한을 올리는 것이 답일 수도 있지만, 대개는 핸들러가
+				// 밀리고 있다는 신호다.
+				LOGE("pool hit its commit limit : %llu + %zu > %llu bytes. "
+					"bin %u (block size %u) will not grow and allocations start failing",
+					(unsigned long long)committed, bytes,
+					(unsigned long long)m_maxCommittedBytes,
+					bin, spec.blockSize);
+
+				return false;
+			}
+		}
 
 		// VirtualAlloc 은 64KB 경계로 정렬된 주소를 준다.
 		// stride 와 headerSize 가 payloadAlignment 의 배수이므로

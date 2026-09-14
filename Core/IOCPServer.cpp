@@ -152,6 +152,9 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		return false;
 	}
 
+	// 폭주 차단기. 정상 운영이라면 닿지 않는 값이다. (PreDefine.h 주석 참고)
+	m_jobMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_JOB);
+
 
 	EngineMemoryPool::SlabConfig configsPacket[] = {
 		{64, 1024},
@@ -179,6 +182,8 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		return false;
 	}
 
+	m_packetMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_PACKET);
+
 	EngineMemoryPool::SlabConfig configsImageBuffer[] = {
 		{MEMORY_SIZE_1MB, 1},
 		//{MEMORY_SIZE_4MB, 1},
@@ -195,6 +200,8 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		return false;
 	}
 
+	m_generalMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_GENERAL);
+
 	// 송신 큐 엔트리 풀. 빈은 하나면 된다 — 담는 것이 한 종류뿐이다.
 	EngineMemoryPool::SlabConfig configsSendQueue[] = {
 		{sizeof(SendPacketEntry), SEND_QUEUE_ENTRY_COUNT},
@@ -209,6 +216,8 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		LOGE("failed to initialize the send queue memory pool");
 		return false;
 	}
+
+	m_sendQueueMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_SENDQUEUE);
 
 	m_readySessionQueue = new ReadySessionQueue;
 	if (!m_readySessionQueue)
