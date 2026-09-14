@@ -482,16 +482,28 @@ bool IOCPClient::RunClientConnectSequence()
 		return false;
 	}
 
+	// 접속 통지를 인증 요청 '전' 에 보낸다.
+	//
+	// 순서가 반대였다. 그런데 SendSystemAuthRequest 는 그 자리에서 WSASend 를
+	// 발행하고, 루프백이면 응답이 마이크로초 안에 돌아와 다른 GQCS 워커가
+	// OnSessionEstablished 를 부른다. 그래서 서비스가 접속 통지보다 established
+	// 통지를 먼저 받을 수 있었다.
+	//
+	// 서비스가 접속 통지에서 세션별 자원을 잡고 established 에서 쓴다면 그건
+	// 곧 널 참조다. 게다가 그 사이에 세션이 정리되면 MarkServiceConnectNotified
+	// 가 이미 끝난 종료 뒤에 래치를 세워, 종료 통지의 짝이 어긋난다.
+	//
+	// 아직 아무것도 보내지 않았으므로 이 자리에서는 응답이 올 수 없다.
+	// 서버 쪽 RunAcceptedConnectSequence 와 같은 모양이 된다.
+	m_session->MarkServiceConnectNotified();
+
+	OnClientConnect(m_session);
+
 	if (!SendSystemAuthRequest(m_session))
 	{
 		LOGE("session %u system auth request send failed", m_session->GetSessionID());
 		return false;
 	}
-
-	// 표시를 먼저. 이유는 서버 쪽 RunAcceptedConnectSequence 와 같다.
-	m_session->MarkServiceConnectNotified();
-
-	OnClientConnect(m_session);
 
 	return true;
 }
@@ -1168,14 +1180,42 @@ bool IOCPClient::SendSystemAuthRequest(ClientSession* session)
 	CS_SYSTEM_AUTH_REQUEST_PACKET* request = reinterpret_cast<CS_SYSTEM_AUTH_REQUEST_PACKET*>(memory);
 	*request = CS_SYSTEM_AUTH_REQUEST_PACKET();
 
+	// 상태를 보내기 '전' 에 올린다.
+	//
+	// 순서가 반대였다. 큐에 넣고 나서 AUTH_PENDING 을 썼는데, EnqueueSendPacket 은
+	// 그 자리에서 WSASend 까지 발행한다. 루프백이면 서버가 요청을 받아 응답을
+	// 돌려주는 왕복이 마이크로초 단위로 끝나고, 그 응답을 처리하는 것은 이
+	// 스레드가 아니라 클라의 '다른' GQCS 워커다 (접속 완료와 수신 완료는 서로
+	// 다른 완료 통지다).
+	//
+	// 그래서 저쪽이 ESTABLISHED 를 쓴 뒤에 이쪽이 AUTH_PENDING 으로 덮어쓸 수
+	// 있었다. 그러면 세션은 영원히 AUTH_PENDING 에 남는다 — ESTABLISHED 를 다시
+	// 쓰는 경로가 없기 때문이다. 그 뒤로는
+	//   서비스 패킷 송신이 "established 전" 으로 거부되고,
+	//   서버가 보낸 에코가 도착하면 "service packet received before session
+	//   established" 로 판정해 클라가 스스로 연결을 끊는다.
+	// 읽지 않은 데이터를 안은 채 소켓이 닫히므로 RST 가 나가고, 서버의 걸려
+	// 있던 WSASend 가 10054 로 실패해 서버도 그 세션을 잃는다.
+	//
+	// 실측: bench Phase 6 이 93회 중 1회 이 경로로 세션을 잃었다. 창을 넓혀
+	// (이 자리에 Sleep(1)) 확인하면 40개 세션 전부가 AUTH_PENDING 으로
+	// 되돌아갔다. (tools/authrace)
+	//
+	// 먼저 올려 두면 덮어쓸 것이 없다. 시스템 패킷 송신은 IsTransportConnected
+	// 만 보므로(CanSendPacket) AUTH_PENDING 상태에서도 이 요청은 나간다.
+	session->SetClientSessionState(ClientSessionState::AUTH_PENDING);
+
 	void* packetData = request;
 	if (!session->EnqueueSendPacket(&packetData, sizeof(CS_SYSTEM_AUTH_REQUEST_PACKET)))
 	{
+		// 보내지 못했으니 되돌린다. 나간 것이 없으므로 응답이 올 수도 없고,
+		// 따라서 이 쓰기가 ESTABLISHED 를 덮을 일도 없다.
+		session->SetClientSessionState(ClientSessionState::CONNECTED);
+
 		MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), request);
 		return false;
 	}
 
-	session->SetClientSessionState(ClientSessionState::AUTH_PENDING);
 	return true;
 }
 
