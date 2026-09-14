@@ -19,6 +19,7 @@
 
 #include "../Memory/EngineMemoryPool.h"
 #include "../Memory/EngineMemoryPoolHelper.h"
+#include "../Memory/EnginePoolBuilder.h"
 
 #include "../Network/SocketOption.h"
 
@@ -81,7 +82,7 @@ IOCPServer::~IOCPServer()
 	StopServer();
 }
 
-bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount, const SessionBufferConfig& bufferConfig, const ConnectionPolicyConfig& policyConfig)
+bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount, const SessionBufferConfig& bufferConfig, const ConnectionPolicyConfig& policyConfig, const EnginePoolConfig& poolConfig)
 {
 	// 설정 오류는 아무것도 잡기 전에 걸러낸다. 세션 생성 단계까지 끌고 가면
 	// 세션을 하나도 못 잡는 서버가 정상 기동한 것처럼 보인다.
@@ -134,90 +135,24 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		return false;
 	}
 
-	constexpr size_t JobObjectSize = sizeof(Job);
-	constexpr size_t AlignedJobObjectSize = (JobObjectSize + 63) & ~63;
-	EngineMemoryPool::SlabConfig configsJob[] = {
-		{AlignedJobObjectSize, 1024}
-	};
-
-	m_jobMemoryPool = new EngineMemoryPool;
-	if (!m_jobMemoryPool)
-		return false;
-
-	// Job 은 __declspec(align(64)) 이므로 페이로드도 64바이트 정렬이어야 한다.
-	// 예전 풀은 16바이트만 보장해서 4개 중 1개만 실제로 정렬되어 있었다.
-	if (!m_jobMemoryPool->Initialize(configsJob, _countof(configsJob), alignof(Job)))
+	// 메모리 풀 네 개. 빈 목록과 커밋 상한은 전부 poolConfig 가 정한다.
+	//
+	// 예전에는 이 자리에 빈 목록이 상수로 박혀 있었다. 담기는 것이 서비스의
+	// 데이터인데 크기 분포를 엔진이 정하고 있었던 셈이고, 서비스는 손댈
+	// 방법이 없었다. (사정과 기본값은 Memory/EnginePoolConfig.h 참고)
+	//
+	// 만들기는 전부 성공하거나 전부 지워진다. 예전에는 실패 지점마다 이미
+	// 만든 풀이 그대로 남은 채 false 만 돌아갔다.
+	ENGINE_POOL::EnginePools pools;
+	if (!ENGINE_POOL::CreatePools(poolConfig, bufferConfig.maxRecvPacketSize, "server", pools))
 	{
-		LOGE("failed to initialize the job memory pool");
 		return false;
 	}
 
-	// 폭주 차단기. 정상 운영이라면 닿지 않는 값이다. (PreDefine.h 주석 참고)
-	m_jobMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_JOB);
-
-
-	EngineMemoryPool::SlabConfig configsPacket[] = {
-		{64, 1024},
-		{128, 1024},
-		{256, 1024},
-		{512, 1024},
-		{MEMORY_SIZE_1K, 1024},
-		{MEMORY_SIZE_2K, 1024},
-		{MEMORY_SIZE_4K, 1024},
-		{MEMORY_SIZE_8K, 512},
-		{MEMORY_SIZE_16K, 512},
-		{MEMORY_SIZE_32K, 512},
-	};
-
-	m_packetMemoryPool = new EngineMemoryPool;
-	if (!m_packetMemoryPool)
-		return false;
-
-	// 바로 위 job 풀은 반환값을 검사하는데 여기 둘은 버리고 있었다.
-	// 실패하면 bin 이 하나도 없는 풀이 그대로 살아남아, 첫 패킷 할당에서야
-	// 정체 모를 실패로 드러난다. 기동 시점에 끊는 편이 낫다.
-	if (!m_packetMemoryPool->Initialize(configsPacket, _countof(configsPacket)))
-	{
-		LOGE("failed to initialize the packet memory pool");
-		return false;
-	}
-
-	m_packetMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_PACKET);
-
-	EngineMemoryPool::SlabConfig configsImageBuffer[] = {
-		{MEMORY_SIZE_1MB, 1},
-		//{MEMORY_SIZE_4MB, 1},
-		//{MEMORY_SIZE_8MB, 1}
-	};
-
-	m_generalMemoryPool = new EngineMemoryPool;
-	if (!m_generalMemoryPool)
-		return false;
-
-	if (!m_generalMemoryPool->Initialize(configsImageBuffer, _countof(configsImageBuffer)))
-	{
-		LOGE("failed to initialize the general memory pool");
-		return false;
-	}
-
-	m_generalMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_GENERAL);
-
-	// 송신 큐 엔트리 풀. 빈은 하나면 된다 — 담는 것이 한 종류뿐이다.
-	EngineMemoryPool::SlabConfig configsSendQueue[] = {
-		{sizeof(SendPacketEntry), SEND_QUEUE_ENTRY_COUNT},
-	};
-
-	m_sendQueueMemoryPool = new EngineMemoryPool;
-	if (!m_sendQueueMemoryPool)
-		return false;
-
-	if (!m_sendQueueMemoryPool->Initialize(configsSendQueue, _countof(configsSendQueue)))
-	{
-		LOGE("failed to initialize the send queue memory pool");
-		return false;
-	}
-
-	m_sendQueueMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_SENDQUEUE);
+	m_jobMemoryPool = pools.job;
+	m_packetMemoryPool = pools.packet;
+	m_generalMemoryPool = pools.general;
+	m_sendQueueMemoryPool = pools.sendQueue;
 
 	m_readySessionQueue = new ReadySessionQueue;
 	if (!m_readySessionQueue)

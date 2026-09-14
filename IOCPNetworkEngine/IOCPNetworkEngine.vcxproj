@@ -62,6 +62,8 @@
     <ClInclude Include="..\Memory\EngineMemoryPool.h" />
     <ClInclude Include="..\Memory\EngineMemoryPoolFwd.h" />
     <ClInclude Include="..\Memory\EngineMemoryPoolHelper.h" />
+    <ClInclude Include="..\Memory\EnginePoolConfig.h" />
+    <ClInclude Include="..\Memory\EnginePoolBuilder.h" />
     <ClInclude Include="..\Memory\BlockLayout.h" />
     <ClInclude Include="..\Memory\GlobalBlockPool.h" />
     <ClInclude Include="..\Memory\SizeBin.h" />

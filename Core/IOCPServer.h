@@ -4,6 +4,7 @@
 #include "../Job/JobDefs.h"
 #include "../Protocol/SystemPacket.h"
 #include "../Buffer/SessionBufferConfig.h"
+#include "../Memory/EnginePoolConfig.h"
 #include "../Session/ConnectionPolicyConfig.h"
 
 #include <stdint.h>
@@ -35,9 +36,19 @@ public:
 	virtual ~IOCPServer();
 
 public:
+	// poolConfig 는 메모리 풀 네 개의 빈 목록과 커밋 상한이다.
+	//
+	// 예전에는 이 값들이 StartServer 안에 상수로 박혀 있었다. 풀에 담기는
+	// 것은 서비스의 데이터인데 크기 분포를 엔진이 정하고 있었던 셈이다.
+	// 채팅형 서비스는 패킷의 대부분이 수백 바이트인데 32K 빈까지 선할당했고,
+	// 반대로 큰 패킷을 받는 서비스는 최대 빈을 넘어 조용히 힙을 쳤다.
+	//
+	// 기본값은 예전에 박혀 있던 값 그대로이므로, 넘기지 않으면 동작이 바뀌지
+	// 않는다. (값과 조정 방법은 Memory/EnginePoolConfig.h 참고)
 	bool StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount,
 		const SessionBufferConfig& bufferConfig = SessionBufferPreset::Server(),
-		const ConnectionPolicyConfig& policyConfig = ConnectionPolicyConfig());
+		const ConnectionPolicyConfig& policyConfig = ConnectionPolicyConfig(),
+		const EnginePoolConfig& poolConfig = EnginePoolPreset::Server());
 	void StopServer();
 
 private:

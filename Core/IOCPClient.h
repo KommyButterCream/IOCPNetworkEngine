@@ -4,6 +4,7 @@
 #include "../Session/ISessionEvent.h"
 #include "../Job/JobDefs.h"
 #include "../Buffer/SessionBufferConfig.h"
+#include "../Memory/EnginePoolConfig.h"
 
 #include <stdint.h>
 
@@ -60,9 +61,12 @@ public:
 	// 조절할 수 있게 연 이유는 그 콜백이 무거운 서비스가 있기 때문이다.
 	// 다만 늘린다고 처리량이 비례해 늘지는 않는다 — 클라의 진짜 상한은
 	// 잡을 실행하는 ClientSessionScheduler 스레드 하나다.
+	//
+	// poolConfig 의 사정은 IOCPServer::StartServer 의 같은 인자 주석과 같다.
 	bool StartClient(const char* serverIp, const uint16_t port,
 		const SessionBufferConfig& bufferConfig = SessionBufferPreset::Client(),
-		uint32_t iocpThreadCount = 0);
+		uint32_t iocpThreadCount = 0,
+		const EnginePoolConfig& poolConfig = EnginePoolPreset::Client());
 	void StopClient();
 
 private:

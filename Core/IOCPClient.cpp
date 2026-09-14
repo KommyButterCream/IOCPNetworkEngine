@@ -17,6 +17,7 @@
 
 #include "../Memory/EngineMemoryPool.h"
 #include "../Memory/EngineMemoryPoolHelper.h"
+#include "../Memory/EnginePoolBuilder.h"
 
 #include "../Buffer/RecvPacketBuffer.h"
 #include "../Buffer/SendPacketEntry.h"
@@ -69,7 +70,7 @@ IOCPClient::~IOCPClient()
 	StopClient();
 }
 
-bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const SessionBufferConfig& bufferConfig, uint32_t iocpThreadCount)
+bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const SessionBufferConfig& bufferConfig, uint32_t iocpThreadCount, const EnginePoolConfig& poolConfig)
 {
 	// 종료 게이트를 초기화한다. 객체 재사용을 지원하지는 않지만(m_destroyFlag 가
 	// 되돌아가지 않는다) 플래그가 의미를 잃은 채 남아 있지 않게 한다.
@@ -143,122 +144,22 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		return false;
 	}
 
-	constexpr size_t JobObjectSize = sizeof(Job);
-	constexpr size_t AlignedJobObjectSize = (JobObjectSize + 63) & ~63;
-	EngineMemoryPool::SlabConfig configsJob[] = {
-		{AlignedJobObjectSize, 1024}
-	};
-
-	m_jobMemoryPool = new EngineMemoryPool;
-	if (!m_jobMemoryPool)
-		return false;
-
-	// Job 은 __declspec(align(64)) 이므로 페이로드도 64바이트 정렬이어야 한다.
-	// 예전 풀은 16바이트만 보장해서 4개 중 1개만 실제로 정렬되어 있었다.
-	if (!m_jobMemoryPool->Initialize(configsJob, _countof(configsJob), alignof(Job)))
+	// 메모리 풀 네 개. 구성은 서버와 같은 경로를 쓴다.
+	// (사정은 IOCPServer::StartServer 의 같은 자리와 Memory/EnginePoolConfig.h 참고)
+	//
+	// 패킷 풀이 수신 상한을 덮는지 확인하는 검사도 그 안으로 들어갔다.
+	// 예전에는 이 검사가 클라에만 있었다 — 서버는 지금 프리셋에서 우연히
+	// 안전할 뿐이고, 서비스가 maxRecvPacketSize 를 올리면 조용히 힙으로 샜다.
+	ENGINE_POOL::EnginePools pools;
+	if (!ENGINE_POOL::CreatePools(poolConfig, bufferConfig.maxRecvPacketSize, "client", pools))
 	{
-		LOGE("failed to initialize the job memory pool");
 		return false;
 	}
 
-	// 폭주 차단기. 정상 운영이라면 닿지 않는 값이다. (PreDefine.h 주석 참고)
-	m_jobMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_JOB);
-
-	// 마지막 빈이 64K 인 이유.
-	//
-	// 클라 프리셋은 maxRecvPacketSize 를 PACKET_SIZE_LIMIT(65535) 로 둔다.
-	// 그런데 여기 최대 빈은 32K 였다. 그 사이 크기(32769~65535)의 패킷은
-	// TlsMemoryPool::Acquire 가 bin >= binCount 로 보고 AcquireBypass 로
-	// 보내므로, 패킷마다 HeapAlloc / HeapFree 를 한 번씩 하게 된다.
-	// 풀을 만든 이유가 바로 그걸 피하려던 것이다.
-	//
-	// 조용히 빠진다는 점이 더 나빴다. 프리셋만 보면 65535 까지 받는 줄 알고,
-	// 로그도 나가지 않는다 (지표는 LogStats 의 bypass 카운터에만 남는다).
-	//
-	// 지금까지 안 터진 건 여유가 아니라 우연이다. StreamingServer 의 프레임
-	// 청크가 정확히 32768 바이트라 마지막 빈에 딱 걸쳐 있었다. 1바이트만
-	// 커져도 전부 힙으로 갔다.
-	//
-	// 개수가 적은 것은 의도다. 큰 빈은 블록 하나가 비싸고(64K x 64 = 4MB)
-	// 부족하면 런타임에 확장된다. growth 가 0 이 아니면 그때 늘리면 된다.
-	EngineMemoryPool::SlabConfig configsPacket[] = {
-		{64, 1024},
-		{128, 1024},
-		{256, 1024},
-		{512, 1024},
-		{MEMORY_SIZE_1K, 512},
-		{MEMORY_SIZE_2K, 512},
-		{MEMORY_SIZE_4K, 512},
-		{MEMORY_SIZE_8K, 256},
-		{MEMORY_SIZE_16K, 128},
-		{MEMORY_SIZE_32K, 128},
-		{MEMORY_SIZE_64K, 64},
-	};
-
-	m_packetMemoryPool = new EngineMemoryPool;
-	if (!m_packetMemoryPool)
-		return false;
-
-	// 서버 쪽과 같은 이유로 반환값을 검사한다 (IOCPServer::StartServer 주석 참고).
-	if (!m_packetMemoryPool->Initialize(configsPacket, _countof(configsPacket)))
-	{
-		LOGE("failed to initialize the packet memory pool");
-		return false;
-	}
-
-	m_packetMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_PACKET);
-
-	// 풀이 설정된 수신 상한을 실제로 덮는지 확인한다.
-	//
-	// 위의 빈 목록과 bufferConfig 는 서로 다른 곳에서 정해지므로 언제든 다시
-	// 어긋날 수 있다. 어긋나면 동작은 계속되지만 패킷마다 힙을 쓴다 — 관측이
-	// 어려운 성능 저하다. 기동 시점에 끊는 편이 낫다.
-	if (m_packetMemoryPool->GetBinIndex(bufferConfig.maxRecvPacketSize) >= m_packetMemoryPool->GetBinCount())
-	{
-		LOGE("the packet pool does not cover maxRecvPacketSize %u (largest bin is %u bytes). "
-			"every packet above that size would bypass the pool and hit the heap",
-			bufferConfig.maxRecvPacketSize,
-			m_packetMemoryPool->GetBinBlockSize(m_packetMemoryPool->GetBinCount() - 1));
-		return false;
-	}
-
-	EngineMemoryPool::SlabConfig configsImageBuffer[] = {
-	{MEMORY_SIZE_1MB, 1},
-	//{MEMORY_SIZE_4MB, 100},
-	//{MEMORY_SIZE_8MB, 50}
-	};
-
-	m_generalMemoryPool = new EngineMemoryPool;
-	if (!m_generalMemoryPool)
-		return false;
-
-	if (!m_generalMemoryPool->Initialize(configsImageBuffer, _countof(configsImageBuffer)))
-	{
-		LOGE("failed to initialize the general memory pool");
-		return false;
-	}
-
-	m_generalMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_GENERAL);
-
-	// 송신 큐 엔트리 풀. 구성은 서버와 같다 (IOCPServer::StartServer 참고).
-	//
-	// 예전에는 같은 총량을 샤드 1개로 만들었다. 세션이 하나뿐이라 샤딩이
-	// 무의미했고, 그래도 총량만큼을 기동 시점에 전부 잡았다.
-	EngineMemoryPool::SlabConfig configsSendQueue[] = {
-		{sizeof(SendPacketEntry), SEND_QUEUE_ENTRY_COUNT},
-	};
-
-	m_sendQueueMemoryPool = new EngineMemoryPool;
-	if (!m_sendQueueMemoryPool)
-		return false;
-
-	if (!m_sendQueueMemoryPool->Initialize(configsSendQueue, _countof(configsSendQueue)))
-	{
-		LOGE("failed to initialize the send queue memory pool");
-		return false;
-	}
-
-	m_sendQueueMemoryPool->SetCommitLimit(POOL_COMMIT_LIMIT_SENDQUEUE);
+	m_jobMemoryPool = pools.job;
+	m_packetMemoryPool = pools.packet;
+	m_generalMemoryPool = pools.general;
+	m_sendQueueMemoryPool = pools.sendQueue;
 
 	m_handlerContext.jobMemoryPool = GetJobMemoryPool();
 	m_handlerContext.packetMemoryPool = GetPacketMemoryPool();
