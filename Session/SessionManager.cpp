@@ -140,6 +140,11 @@ void SessionManager::SetSessionDisconnectNotifyFunc(SessionDisconnectNotifyFunc 
 	m_clientSessionPool->SetDisconnectNotifyFunc(notifyFunc, context);
 }
 
+uint32_t SessionManager::GetPeakJobQueueDepth() const
+{
+	return m_clientSessionPool ? m_clientSessionPool->GetPeakJobQueueDepth() : 0;
+}
+
 uint32_t SessionManager::GetOutstandingIOCount() const
 {
 	uint32_t total = 0;

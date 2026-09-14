@@ -46,6 +46,10 @@ bool SessionJobQueue::EnqueueJob(Job* job, bool& wasEmpty)
 
 	++m_count;
 
+	// 최고 수위. 이미 잡고 있는 락 안이라 비용이 비교 하나다.
+	if (m_count > m_peakCount)
+		m_peakCount = m_count;
+
 	if (m_sessionRole == SESSION_ROLE::CLIENT)
 	{
 		::WakeConditionVariable(&m_cv);
@@ -162,6 +166,11 @@ void SessionJobQueue::Reset()
 	m_head = nullptr;
 	m_tail = nullptr;
 	m_count = 0;
+
+	// 세션이 다음 접속에 재배포되면 수위도 새로 센다.
+	// 남겨 두면 남의 접속에서 쌓인 값을 자기 것으로 보고하게 된다.
+	m_peakCount = 0;
+
 	m_stopFlag = false;
 
 	::ReleaseSRWLockExclusive(&m_srwLock);
@@ -173,4 +182,29 @@ bool SessionJobQueue::IsEmpty() const
 	bool isEmpty = (m_count == 0);
 	::ReleaseSRWLockShared(&m_srwLock);
 	return isEmpty;
+}
+
+uint32_t SessionJobQueue::GetCount() const
+{
+	::AcquireSRWLockShared(&m_srwLock);
+	const int32_t count = m_count;
+	::ReleaseSRWLockShared(&m_srwLock);
+
+	return (count > 0) ? static_cast<uint32_t>(count) : 0;
+}
+
+uint32_t SessionJobQueue::GetPeakCount() const
+{
+	::AcquireSRWLockShared(&m_srwLock);
+	const int32_t peak = m_peakCount;
+	::ReleaseSRWLockShared(&m_srwLock);
+
+	return (peak > 0) ? static_cast<uint32_t>(peak) : 0;
+}
+
+void SessionJobQueue::ResetPeakCount()
+{
+	::AcquireSRWLockExclusive(&m_srwLock);
+	m_peakCount = m_count;
+	::ReleaseSRWLockExclusive(&m_srwLock);
 }

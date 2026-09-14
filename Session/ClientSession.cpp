@@ -447,6 +447,19 @@ SessionJobQueue& ClientSession::GetJobQueue() const
 	return *m_jobQueue;
 }
 
+uint32_t ClientSession::GetJobQueueDepth() const
+{
+	// GetJobQueue 와 달리 널을 정상 입력으로 다룬다.
+	// 이 둘은 풀 전체를 훑는 쪽에서 불리므로, 아직 임대되지 않았거나
+	// 이미 정리된 세션도 지나간다.
+	return m_jobQueue ? m_jobQueue->GetCount() : 0;
+}
+
+uint32_t ClientSession::GetJobQueuePeakDepth() const
+{
+	return m_jobQueue ? m_jobQueue->GetPeakCount() : 0;
+}
+
 bool ClientSession::PostReceive()
 {
 	// 수신 1건당 호출되는 핫패스. 릴리스에서는 컴파일 제거된다.

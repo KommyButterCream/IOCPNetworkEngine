@@ -1766,6 +1766,11 @@ void IOCPServer::OnSessionDisconnectNotify(void* context, ClientSession* session
 	static_cast<IOCPServer*>(context)->OnClientDisconnect(session);
 }
 
+uint32_t IOCPServer::GetPeakJobQueueDepth() const
+{
+	return m_sessionManager ? m_sessionManager->GetPeakJobQueueDepth() : 0;
+}
+
 uint32_t IOCPServer::GetInUseSessionCount() const
 {
 	if (!m_sessionManager)

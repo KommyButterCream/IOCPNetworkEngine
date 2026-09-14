@@ -132,6 +132,10 @@ public:
 
 	SessionJobQueue& GetJobQueue() const;
 
+	// 잡 큐 수위. 큐 객체가 없는 상태(초기화 전/정리 후)에서도 안전하다.
+	uint32_t GetJobQueueDepth() const;
+	uint32_t GetJobQueuePeakDepth() const;
+
 	bool PostReceive();
 	bool TrySendNext();
 	bool PostCurrentSend();

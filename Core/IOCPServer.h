@@ -205,6 +205,15 @@ public:
 	// 그 둘은 별개의 실패다.
 	uint32_t GetInUseSessionCount() const;
 
+	// 지금 가장 밀린 세션의 잡 큐가 도달했던 최고 깊이.
+	//
+	// 잡 큐에는 상한이 없다. 핸들러가 유입보다 느리면 잡이 계속 쌓이고,
+	// 잡 하나가 패킷 하나를 붙들고 있으므로 메모리도 함께 자란다.
+	// 상한을 어디에 둘지는 이 값을 실제로 보고 정해야 한다.
+	//
+	// 합이 아니라 최댓값인 이유는 ClientSessionPool 쪽 주석 참고.
+	uint32_t GetPeakJobQueueDepth() const;
+
 protected:
 	EngineMemoryPool* GetJobMemoryPool() const;
 	EngineMemoryPool* GetPacketMemoryPool() const;

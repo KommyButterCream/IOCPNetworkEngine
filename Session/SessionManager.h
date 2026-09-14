@@ -63,6 +63,9 @@ public:
 public:
 	uint32_t GetOutstandingIOCount() const;
 
+	// 가장 밀린 세션의 잡 큐 최고 수위.
+	uint32_t GetPeakJobQueueDepth() const;
+
 	ClientSession* AcquireClientSession();
 	void ReleaseClientSession(ISession* session);
 

@@ -468,6 +468,30 @@ uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t 
 	return disconnectedCount;
 }
 
+uint32_t ClientSessionPool::GetPeakJobQueueDepth() const
+{
+	if (!m_sessions)
+		return 0;
+
+	// 합이 아니라 최댓값이다.
+	//
+	// 잡 큐는 세션마다 따로이고 소비자도 세션 단위로 붙으므로, 위험한 것은
+	// 총합이 아니라 "가장 밀린 세션 하나" 다. 합으로 보면 세션 천 개가
+	// 하나씩 들고 있는 정상 상태와 한 세션이 천 개를 쌓아둔 상태가
+	// 같은 숫자로 보인다.
+	uint32_t peak = 0;
+
+	for (uint32_t i = 0; i < m_capacity; ++i)
+	{
+		const uint32_t sessionPeak = m_sessions[i].GetJobQueuePeakDepth();
+
+		if (sessionPeak > peak)
+			peak = sessionPeak;
+	}
+
+	return peak;
+}
+
 uint32_t ClientSessionPool::GetOutstandingIOCount() const
 {
 	if (!m_sessions)

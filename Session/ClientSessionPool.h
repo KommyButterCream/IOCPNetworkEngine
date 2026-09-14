@@ -97,6 +97,9 @@ public:
 
 	// 지금 이 풀의 세션들이 들고 있는 미완료 I/O 총합.
 	// 하네스가 시나리오 경계에서 회계를 검사한다. 정상 종료 후에는 0 이어야 한다.
+	// 가장 밀린 세션의 잡 큐 최고 수위. 상한을 정하려면 먼저 재야 한다.
+	uint32_t GetPeakJobQueueDepth() const;
+
 	uint32_t GetOutstandingIOCount() const;
 
 private:
