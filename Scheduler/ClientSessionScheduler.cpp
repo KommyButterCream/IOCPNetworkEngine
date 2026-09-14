@@ -93,9 +93,18 @@ void ClientSessionScheduler::Run()
 				}
 			}
 
+			// 잡을 반납하기 전에 세션이 들고 있던 참조를 끊는다.
+			//
+			// 예전에는 끊지 않았다. 그래서 ReleaseJob 뒤에도 m_currentJob 이
+			// 방금 풀로 돌아간 블록을 계속 가리켰고, 그 블록은 곧 다른
+			// 할당에 재배포된다. 그 상태에서 누군가 ClearCurrentJobData 를
+			// 부르면 남의 블록에 nullptr 을 써넣는다.
+			//
+			// 반드시 ReleaseJob 앞이어야 한다. 뒤에 두면 그 사이가 그대로
+			// 같은 창이다.
+			m_clientSession->SetCurrentJob(nullptr);
+
 			MEMORY_POOL::ReleaseJob(*m_jobMemoryPool, job);
 		}
-
-		m_clientSession->UpdateProcessingFlag(0);
 	}
 }

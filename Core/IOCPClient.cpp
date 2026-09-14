@@ -69,7 +69,7 @@ IOCPClient::~IOCPClient()
 	StopClient();
 }
 
-bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const SessionBufferConfig& bufferConfig)
+bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const SessionBufferConfig& bufferConfig, uint32_t iocpThreadCount)
 {
 	// 종료 게이트를 초기화한다. 객체 재사용을 지원하지는 않지만(m_destroyFlag 가
 	// 되돌아가지 않는다) 플래그가 의미를 잃은 채 남아 있지 않게 한다.
@@ -100,7 +100,25 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 	// 2개를 유지하는 이유는 다른 것이다 — 서비스 콜백(OnReceive 등)이 워커
 	// 스레드에서 실행되므로, 하나가 서비스 코드에 붙들려 있어도 나머지 하나가
 	// 완료 통지를 계속 꺼낼 수 있어야 한다.
-	SetIOCPThreadCount(2);
+	//
+	// 그래서 1 은 받지 않는다. 그 이유가 사라지기 때문이다.
+	// (기본값과 상한의 사정은 IOCPClient.h 의 선언 주석 참고)
+	constexpr uint32_t DEFAULT_CLIENT_IOCP_THREADS = 2;
+	constexpr uint32_t MIN_CLIENT_IOCP_THREADS = 2;
+
+	uint32_t workerCount = (iocpThreadCount == 0) ? DEFAULT_CLIENT_IOCP_THREADS : iocpThreadCount;
+
+	if (workerCount < MIN_CLIENT_IOCP_THREADS)
+	{
+		LOGW("client iocp thread count %u raised to %u : one worker must stay free to drain completions "
+			"while another is inside a service callback",
+			workerCount, MIN_CLIENT_IOCP_THREADS);
+		workerCount = MIN_CLIENT_IOCP_THREADS;
+	}
+
+	LOGI("client iocp workers : %u", workerCount);
+
+	SetIOCPThreadCount(workerCount);
 
 	if (!IOCPCore::Start())
 	{
@@ -143,6 +161,23 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		return false;
 	}
 
+	// 마지막 빈이 64K 인 이유.
+	//
+	// 클라 프리셋은 maxRecvPacketSize 를 PACKET_SIZE_LIMIT(65535) 로 둔다.
+	// 그런데 여기 최대 빈은 32K 였다. 그 사이 크기(32769~65535)의 패킷은
+	// TlsMemoryPool::Acquire 가 bin >= binCount 로 보고 AcquireBypass 로
+	// 보내므로, 패킷마다 HeapAlloc / HeapFree 를 한 번씩 하게 된다.
+	// 풀을 만든 이유가 바로 그걸 피하려던 것이다.
+	//
+	// 조용히 빠진다는 점이 더 나빴다. 프리셋만 보면 65535 까지 받는 줄 알고,
+	// 로그도 나가지 않는다 (지표는 LogStats 의 bypass 카운터에만 남는다).
+	//
+	// 지금까지 안 터진 건 여유가 아니라 우연이다. StreamingServer 의 프레임
+	// 청크가 정확히 32768 바이트라 마지막 빈에 딱 걸쳐 있었다. 1바이트만
+	// 커져도 전부 힙으로 갔다.
+	//
+	// 개수가 적은 것은 의도다. 큰 빈은 블록 하나가 비싸고(64K x 64 = 4MB)
+	// 부족하면 런타임에 확장된다. growth 가 0 이 아니면 그때 늘리면 된다.
 	EngineMemoryPool::SlabConfig configsPacket[] = {
 		{64, 1024},
 		{128, 1024},
@@ -154,6 +189,7 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		{MEMORY_SIZE_8K, 256},
 		{MEMORY_SIZE_16K, 128},
 		{MEMORY_SIZE_32K, 128},
+		{MEMORY_SIZE_64K, 64},
 	};
 
 	m_packetMemoryPool = new EngineMemoryPool;
@@ -164,6 +200,20 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 	if (!m_packetMemoryPool->Initialize(configsPacket, _countof(configsPacket)))
 	{
 		LOGE("failed to initialize the packet memory pool");
+		return false;
+	}
+
+	// 풀이 설정된 수신 상한을 실제로 덮는지 확인한다.
+	//
+	// 위의 빈 목록과 bufferConfig 는 서로 다른 곳에서 정해지므로 언제든 다시
+	// 어긋날 수 있다. 어긋나면 동작은 계속되지만 패킷마다 힙을 쓴다 — 관측이
+	// 어려운 성능 저하다. 기동 시점에 끊는 편이 낫다.
+	if (m_packetMemoryPool->GetBinIndex(bufferConfig.maxRecvPacketSize) >= m_packetMemoryPool->GetBinCount())
+	{
+		LOGE("the packet pool does not cover maxRecvPacketSize %u (largest bin is %u bytes). "
+			"every packet above that size would bypass the pool and hit the heap",
+			bufferConfig.maxRecvPacketSize,
+			m_packetMemoryPool->GetBinBlockSize(m_packetMemoryPool->GetBinCount() - 1));
 		return false;
 	}
 

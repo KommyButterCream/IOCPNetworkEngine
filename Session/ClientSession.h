@@ -46,7 +46,6 @@ private:
 	// Client / Server Role
 	OverlappedEx m_recvOverlapped{};
 	RecvPacketBuffer* m_recvPacketBuffer = nullptr;
-	ULONGLONG m_lastRecvBufferFullTime = 0;
 
 	// 이 세션의 버퍼 크기 정책. InitializeMemoryPool 에서 받아 보관한다.
 	// 송신 상한 검사가 여기를 본다.

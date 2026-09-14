@@ -1574,7 +1574,39 @@ bool IOCPServer::PostAccept(AcceptSession* acceptSession)
 		acceptSession->SetClientSocket(clientSocket);
 
 		// IO 수량 증가(AcceptEx 에 대한 IO)
+		//
+		// 올린 뒤에 종료 여부를 다시 본다. 순서가 핵심이고, 이유는
+		// BaseSession::BeginIO 주석과 같다 — 이 카운트가
+		// WaitForAllAcceptIOCancelComplete 가 통과하지 못하게 막는 장벽이다.
+		//
+		// 이 함수 맨 앞에도 같은 검사가 있지만 그것만으로는 부족하다.
+		// 검사를 통과한 스레드가 여기까지 오는 동안 종료가 시작되면, 카운트가
+		// 0 인 채로 대기가 통과하고 그 뒤에 AcceptEx 가 걸린다. 먼저 올려
+		// 두면 그 구간 내내 카운트가 0 이 아니다.
+		//
+		// 여기서 m_cancelIo 가 아니라 m_serverShutdownRequested 를 보는 이유:
+		// accept 슬롯은 취소할 때 소켓을 곧바로 떼어내는데(RequestAllAcceptIOCancel)
+		// CancelPendingIO 는 소켓이 있을 때만 m_cancelIo 를 세운다. 그래서 그때
+		// 마침 비어 있던 슬롯에는 취소 플래그가 서지 않는다. 종료 플래그는
+		// 슬롯 상태와 무관하게 항상 서 있다.
 		acceptSession->IncrementIO();
+
+		if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
+		{
+			LOGI("accept session %u declining to post AcceptEx : the server is shutting down",
+				acceptSession->GetSessionID());
+
+			// 정리 순서는 아래 AcceptEx 실패 경로와 같다.
+			// ResetSession 은 미완료 I/O 가 있으면 위반을 남기므로
+			// 반드시 DecrementIO 뒤에 온다.
+			acceptSession->DecrementIO();
+			acceptSession->SetAcceptSessionState(AcceptSessionState::ACCEPT_ABORTED);
+
+			IOCPCore::CloseSocketHandle(acceptSession->DetachSocket());
+			acceptSession->ResetSession();
+
+			return false;
+		}
 
 		// Overlapped 구조체 초기화
 		OverlappedEx& overlappedEx = acceptSession->GetAcceptOverlapped();  // session이 미리 생성한 OverlappedEx 포인터 반환

@@ -46,8 +46,23 @@ public:
 	virtual ~IOCPClient();
 
 public:
+	// iocpThreadCount 는 GQCS 워커 수다. 0 이면 기본값 2 를 쓴다.
+	//
+	// 왜 서버처럼 논리 프로세서 수가 아닌가.
+	//   클라의 세션은 하나이고, 그 세션에 걸린 WSARecv 도 하나뿐이다
+	//   (m_recvOverlapped 가 세션당 하나). 그래서 수신 완료는 스레드를
+	//   아무리 늘려도 직렬로 처리된다. 늘려서 얻는 것은 병렬 파싱이 아니라
+	//   "하나가 붙들려도 다른 하나가 큐를 계속 비운다" 뿐이다.
+	//
+	// 그 하나가 필요한 이유는 서비스 콜백(OnReceive 등)이 워커 스레드에서
+	// 실행되기 때문이다. 그래서 최소 2 다.
+	//
+	// 조절할 수 있게 연 이유는 그 콜백이 무거운 서비스가 있기 때문이다.
+	// 다만 늘린다고 처리량이 비례해 늘지는 않는다 — 클라의 진짜 상한은
+	// 잡을 실행하는 ClientSessionScheduler 스레드 하나다.
 	bool StartClient(const char* serverIp, const uint16_t port,
-		const SessionBufferConfig& bufferConfig = SessionBufferPreset::Client());
+		const SessionBufferConfig& bufferConfig = SessionBufferPreset::Client(),
+		uint32_t iocpThreadCount = 0);
 	void StopClient();
 
 private:

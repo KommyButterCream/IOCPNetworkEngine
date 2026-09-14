@@ -132,7 +132,6 @@ void ClientSession::ResetSession()
 		m_jobQueue->Reset();
 	}
 
-	m_lastRecvBufferFullTime = 0;
 	::InterlockedExchange64(&m_lastRecvTick, 0);
 	::InterlockedExchange64(&m_lastHeartbeatTick, 0);
 
@@ -192,7 +191,6 @@ void ClientSession::Finalize()
 	::InterlockedExchange(&m_sending, 0);
 	::InterlockedExchange(&m_processing, 0);
 
-	m_lastRecvBufferFullTime = 0;
 	::InterlockedExchange64(&m_lastRecvTick, 0);
 	::InterlockedExchange64(&m_lastHeartbeatTick, 0);
 
@@ -475,21 +473,23 @@ bool ClientSession::PostReceive()
 
 	if (m_recvOverlapped.wsaBuffer.len == 0)
 	{
-		LOGE("session %u recv ring is full, cannot post recv (stored %u / capacity %u)", GetSessionID(), recvBuf.GetStoredSize(), recvBuf.GetCapacity());
-
-		// 버퍼에 공간이 부족한 경우 시간을 저장했다가
-		// 별도의 타이머 스레드에서 타임아웃 관련 처리(Session Disconnect 등) 하도록 한다.
-		if (m_lastRecvBufferFullTime == 0)
-		{
-			m_lastRecvBufferFullTime = ::GetTickCount64();
-		}
-
-		ENGINE_BREAK_IF_DEBUGGER();
+		// 수신 링에 빈 자리가 없다. 여기서 false 를 돌려주면 호출부
+		// (HandleRecv)가 세션을 반납한다. 그게 이 상황의 처리다.
+		//
+		// 예전에는 이 자리에서 시각을 m_lastRecvBufferFullTime 에 적어 두고
+		// "별도의 타이머 스레드가 타임아웃 처리를 한다" 고 주석이 말했다.
+		// 그런 스레드는 없었고, 그 멤버를 읽는 코드도 없었다. 쓰기만 세 군데
+		// 있는 죽은 변수였으므로 멤버째 지웠다.
+		//
+		// ENGINE_BREAK_IF_DEBUGGER 도 뺐다. 이 조건은 피어가 만들 수 있다 —
+		// 링보다 빨리 밀어 넣으면 된다. 디버거를 붙이고 부하를 거는 동안
+		// 남이 멈출 수 있는 자리를 둘 이유가 없다. 불변식 위반이 아니라
+		// 정상적으로 일어날 수 있는 혼잡 상태다.
+		LOGE("session %u recv ring is full, cannot post recv (stored %u / capacity %u). releasing the session",
+			GetSessionID(), recvBuf.GetStoredSize(), recvBuf.GetCapacity());
 
 		return false;
 	}
-
-	m_lastRecvBufferFullTime = 0;
 
 	// 취소가 걸린 뒤에는 새 수신을 걸지 않는다. (사정은 BaseSession::BeginIO 주석)
 	//
@@ -982,11 +982,27 @@ void ClientSession::SetCurrentJob(Job* job)
 
 void ClientSession::ClearCurrentJobData()
 {
-	// 현재 Send 중인 패킷 데이터에 대한 소유권 포기.
-	// Send IO Complete 시점에 패킷 메모리 해제함.
+	// 지금 실행 중인 잡이 들고 있는 패킷의 소유권을 핸들러가 가져간다.
+	// 이걸 부르면 스케줄러가 그 패킷을 반납하지 않으므로, 부른 쪽이
+	// 반납할 책임을 진다.
 	//
-	// SetCurrentJob 이 널로 불린 뒤에 여기 오면 예전에는 즉시 크래시였다.
-	// 이 클래스의 다른 함수들과 같이 널을 정상 입력으로 다룬다.
+	// 클라이언트 역할 전용이다.
+	//
+	// 이 배선을 놓는 것은 ClientSessionScheduler 뿐이고
+	// ReadySessionScheduler(서버)는 SetCurrentJob 을 부르지 않는다. 그래서
+	// 서버 역할 세션에서는 m_currentJob 이 항상 널이고, 이 함수가 조용히
+	// 아무 일도 하지 않는다. 부른 쪽은 소유권을 가져갔다고 믿는데 스케줄러는
+	// 그대로 패킷을 반납하므로, 그 뒤 그 포인터는 이미 풀로 돌아간 블록이다.
+	// 침묵보다 위반으로 남기는 편이 낫다.
+	if (GetSessionRole() != SESSION_ROLE::CLIENT)
+	{
+		ENGINE_VIOLATION("session %u ClearCurrentJobData is client-only but the role is %d. "
+			"the packet will still be released by the scheduler",
+			GetSessionID(), static_cast<int>(GetSessionRole()));
+		return;
+	}
+
+	// 잡 사이에는 널이다. 스케줄러가 반납 직전에 끊어 둔다.
 	if (!m_currentJob)
 		return;
 
