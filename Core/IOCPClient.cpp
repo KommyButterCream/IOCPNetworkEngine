@@ -114,7 +114,32 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		return false;
 	}
 
-	strcpy_s(m_serverIPAddress, sizeof(m_serverIPAddress), serverIp);
+	// 주소를 복사하기 '전' 에 본다.
+	//
+	// 예전에는 곧바로 strcpy_s 였다. 널이거나 버퍼보다 긴 문자열이 들어오면
+	// CRT 의 잘못된 인자 처리기가 불리고, 기본 처리기는 프로세스를 그 자리에서
+	// 죽인다(0xC0000409). 서비스가 설정 파일에서 읽은 값을 그대로 넘기는 것은
+	// 흔한 형태인데, 그 오타 하나가 진단 한 줄 없는 즉사가 된다.
+	//
+	// 형식이 IPv4 인지까지는 여기서 보지 않는다. 그건 PostConnect 의
+	// inet_pton 이 판정하고 거기서 위반으로 남긴다. 여기서 막는 것은
+	// '복사 자체가 프로세스를 죽이는' 입력이다.
+	if (serverIp == nullptr || serverIp[0] == '\0')
+	{
+		LOGE("StartClient was given no server address");
+		return false;
+	}
+
+	const size_t addressLength = ::strnlen(serverIp, sizeof(m_serverIPAddress));
+	if (addressLength >= sizeof(m_serverIPAddress))
+	{
+		LOGE("the server address is longer than %zu characters", sizeof(m_serverIPAddress) - 1);
+		return false;
+	}
+
+	::memcpy(m_serverIPAddress, serverIp, addressLength);
+	m_serverIPAddress[addressLength] = '\0';
+
 	m_serverPort = port;
 
 	// 워커 2개.
@@ -898,15 +923,22 @@ bool IOCPClient::PostConnect(ClientSession* clientSession)
 	serveraddr.sin_port = htons(m_serverPort);
 	int nResult = ::inet_pton(AF_INET, m_serverIPAddress, &serveraddr.sin_addr);
 
-	if (nResult == 0)
+	if (nResult != 1)
 	{
-		ENGINE_VIOLATION("server address '%s' is not a valid IPv4 address", m_serverIPAddress);
+		// inet_pton 은 0(형식이 틀림)과 -1(그 밖의 오류)을 따로 돌려준다.
+		//
+		// 예전에는 -1 분기가 오류 코드를 읽고 디버거만 세운 뒤 그대로 아래로
+		// 떨어졌다. 그러면 serveraddr 의 sin_addr 이 0 인 채로 ConnectEx 가
+		// 나간다 — 0.0.0.0 은 윈도우에서 로컬 호스트로 해석되므로, 주소가
+		// 틀렸다고 알리는 대신 '엉뚱한 곳에 붙은 클라이언트' 가 된다.
+		// 어느 쪽도 접속할 수 없는 주소라는 사실은 같으므로 함께 실패시킨다.
+		// 위반이 아니라 오류로 남긴다. 이건 엔진의 불변식이 깨진 것이 아니라
+		// 서비스가 준 인자가 틀린 것이고, 서버 쪽 BindServerSocket 의 같은
+		// 판정도 LOGE 다. 위반 계수기는 하네스가 건전성 판정에 쓰므로
+		// 인자 오류로 더럽히지 않는다.
+		LOGE("server address '%s' is not a valid IPv4 address (inet_pton %d, error %d)",
+			m_serverIPAddress, nResult, ::WSAGetLastError());
 		return false;
-	}
-	else if (nResult == -1)
-	{
-		int nError = ::WSAGetLastError();
-		ENGINE_BREAK_IF_DEBUGGER();
 	}
 
 	// GQCS 사용을 위한 IOCP 등록

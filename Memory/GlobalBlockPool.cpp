@@ -155,9 +155,11 @@ namespace MemoryPoolDetail
 				(unsigned long long)keptBytes);
 		}
 
-		// 세그먼트를 전부 돌려줬으므로 회계도 0 으로 되돌린다.
-		// 남겨 두면 같은 객체를 다시 Initialize 했을 때 이전 사용량이
-		// 상한에 그대로 얹힌다.
+		// 회계를 0 으로 되돌린다. 남겨 두면 같은 객체를 다시 Initialize 했을 때
+		// 이전 사용량이 상한에 그대로 얹힌다.
+		//
+		// 붙들어 둔 세그먼트가 있어도 마찬가지다. 그건 버린 메모리이지 다음
+		// 수명이 쓸 수 있는 재고가 아니므로, 그쪽 상한에 얹으면 안 된다.
 		::InterlockedExchange64(&m_committedBytes, 0);
 		::InterlockedExchange64(&m_commitLimitHits, 0);
 	}
