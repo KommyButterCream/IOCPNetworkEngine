@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "IOCPCore.h"
+#include "ClientLivenessConfig.h"
 #include "../Session/ISessionEvent.h"
 #include "../Job/JobDefs.h"
 #include "../Buffer/SessionBufferConfig.h"
@@ -18,6 +19,7 @@ class BaseSession;
 class ClientSession;
 #include "../Memory/EngineMemoryPoolFwd.h"
 class ClientSessionScheduler;
+class ClientWatchdogThread;
 class PacketHandlerTable;
 class SessionContext;
 
@@ -63,10 +65,16 @@ public:
 	// 잡을 실행하는 ClientSessionScheduler 스레드 하나다.
 	//
 	// poolConfig 의 사정은 IOCPServer::StartServer 의 같은 인자 주석과 같다.
+	//
+	// livenessConfig 는 "서버가 죽었다" 를 이쪽이 스스로 판정하는 방법이다.
+	// 예전에는 그 수단이 아예 없어서, 랜선이 빠지거나 서버 프로세스가
+	// 행되면 클라가 영원히 기다렸다. 기본값으로 켜져 있다.
+	// (자세한 사정은 Core/ClientLivenessConfig.h)
 	bool StartClient(const char* serverIp, const uint16_t port,
 		const SessionBufferConfig& bufferConfig = SessionBufferPreset::Client(),
 		uint32_t iocpThreadCount = 0,
-		const EnginePoolConfig& poolConfig = EnginePoolPreset::Client());
+		const EnginePoolConfig& poolConfig = EnginePoolPreset::Client(),
+		const ClientLivenessConfig& livenessConfig = ClientLivenessConfig());
 	void StopClient();
 
 private:
@@ -108,6 +116,14 @@ private:
 	// 송신 큐 엔트리 전용 풀. 분리 이유는 IOCPServer 의 같은 멤버 주석 참고.
 	EngineMemoryPool* m_sendQueueMemoryPool = nullptr;
 	ClientSessionScheduler* m_clientSessionScheduler = nullptr;
+
+	// 서버가 조용해진 것을 알아차리는 감시 스레드.
+	// 왜 잡 스케줄러가 아니라 별도 스레드인지는 ClientWatchdogThread 주석.
+	ClientWatchdogThread* m_clientWatchdog = nullptr;
+
+	// StartClient 에서 받아 보관한다. 인증 응답이 도착했을 때 서버가 알려준
+	// 하트비트 주기와 합쳐 실제 유휴 타임아웃을 정한다.
+	ClientLivenessConfig m_livenessConfig;
 	PacketHandlerTable* m_packetHandlerTable = nullptr;
 	HandlerContext m_handlerContext = {};
 

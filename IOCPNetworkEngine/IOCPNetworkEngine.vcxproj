@@ -21,6 +21,7 @@
   <ItemGroup>
     <ClCompile Include="..\Buffer\RecvPacketBuffer.cpp" />
     <ClCompile Include="..\Buffer\SendPacketQueue.cpp" />
+    <ClCompile Include="..\Core\ClientWatchdogThread.cpp" />
     <ClCompile Include="..\Core\HeartbeatThread.cpp" />
     <ClCompile Include="..\Core\IOCPClient.cpp" />
     <ClCompile Include="..\Core\IOCPCore.cpp" />
@@ -49,6 +50,9 @@
     <ClInclude Include="..\Buffer\SendPacketEntry.h" />
     <ClInclude Include="..\Buffer\SendPacketQueue.h" />
     <ClInclude Include="..\Buffer\SharedSendPacket.h" />
+    <ClInclude Include="..\Core\ClientLivenessConfig.h" />
+    <ClInclude Include="..\Core\ClientWatchdogThread.h" />
+    <ClInclude Include="..\Core\HeartbeatConfig.h" />
     <ClInclude Include="..\Core\HeartbeatThread.h" />
     <ClInclude Include="..\Core\IOCPClient.h" />
     <ClInclude Include="..\Core\IOCPCore.h" />

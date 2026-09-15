@@ -1,4 +1,5 @@
 ﻿#include "IOCPClient.h"
+#include "ClientWatchdogThread.h"
 
 #include <WinSock2.h>
 
@@ -90,7 +91,7 @@ void IOCPClient::DestroyMemoryPools()
 	m_sendQueueMemoryPool = nullptr;
 }
 
-bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const SessionBufferConfig& bufferConfig, uint32_t iocpThreadCount, const EnginePoolConfig& poolConfig)
+bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const SessionBufferConfig& bufferConfig, uint32_t iocpThreadCount, const EnginePoolConfig& poolConfig, const ClientLivenessConfig& livenessConfig)
 {
 	// 지난 주기의 한 번짜리 게이트를 되돌린다.
 	//
@@ -113,6 +114,18 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 			bufferConfig.maxSendPacketSize, bufferConfig.sendQueueDepth);
 		return false;
 	}
+
+	if (!livenessConfig.IsValid())
+	{
+		LOGE("invalid client liveness config : missed heartbeat limit %u, min idle timeout %llu ms, "
+			"keepalive %d (%u ms / %u ms)",
+			livenessConfig.missedHeartbeatLimit, livenessConfig.minIdleTimeout_ms,
+			livenessConfig.useKeepAlive ? 1 : 0,
+			livenessConfig.keepAliveTime_ms, livenessConfig.keepAliveInterval_ms);
+		return false;
+	}
+
+	m_livenessConfig = livenessConfig;
 
 	// 주소를 복사하기 '전' 에 본다.
 	//
@@ -258,6 +271,23 @@ bool IOCPClient::StartClient(const char* serverIp, const uint16_t port, const Se
 		return false;
 	}
 
+	// 서버가 조용해진 것을 알아차리는 감시 스레드.
+	//
+	// 여기서 만들되 무장은 하지 않는다. 기준이 되는 하트비트 주기를
+	// 서버가 인증 응답으로 알려주기 때문이다. 무장은 그 응답을 처리하는
+	// 자리에서 한다. (HandleSystemPacket 의 SC_SYSTEM_AUTH_RESPONSE)
+	m_clientWatchdog = new ClientWatchdogThread(m_session, m_livenessConfig);
+	if (!m_clientWatchdog)
+		return false;
+
+	if (!m_clientWatchdog->Start())
+	{
+		LOGE("failed to start the client liveness watchdog");
+		delete m_clientWatchdog;
+		m_clientWatchdog = nullptr;
+		return false;
+	}
+
 	// 비동기 Connect To Server
 	// 연결에 대한 통지를 GQCS 에서 처리 한다.
 	if (!PrepareConnect())
@@ -274,6 +304,19 @@ void IOCPClient::StopClient()
 		return;
 
 	LOGI("client shutting down");
+
+	// 감시 스레드를 가장 먼저 내린다.
+	//
+	// 이 스레드는 세션 포인터를 들고 주기적으로 깨어나므로, 아래에서
+	// 세션을 지우기 전에 반드시 조인되어 있어야 한다. 그리고 우리가
+	// 내리는 종료와 이 스레드가 내리는 종료가 겹치는 것도 막는다
+	// (겹쳐도 m_disconnecting 이 거르지만, 겹칠 이유가 없다).
+	if (m_clientWatchdog)
+	{
+		m_clientWatchdog->Disarm();
+		delete m_clientWatchdog;
+		m_clientWatchdog = nullptr;
+	}
 
 	if (m_clientSessionScheduler)
 	{
@@ -523,6 +566,25 @@ bool IOCPClient::RunClientConnectSequence()
 	{
 		LOGE("session %u TCP_NODELAY failed, dropping the connection", m_session->GetSessionID());
 		return false;
+	}
+
+	// TCP keepalive.
+	//
+	// 서버는 수락한 소켓에 이미 걸고 있었는데 클라만 빠져 있었다.
+	// 유휴 타임아웃과 겹치는 장치가 아니다 — keepalive 는 커널이 응답하므로
+	// 경로 단절과 호스트 사망은 잡아도 프로세스 행은 못 잡고, 반대로
+	// 유휴 타임아웃은 인증 전 구간(하트비트가 아직 없다)을 덮지 못한다.
+	//
+	// 실패해도 접속을 버리지 않는다. 이건 있으면 좋은 보조 장치이고,
+	// 없다고 해서 연결이 동작하지 않는 것은 아니다.
+	if (m_livenessConfig.useKeepAlive)
+	{
+		if (!SocketOption::SetKeepAliveEx(m_clientSocket,
+			m_livenessConfig.keepAliveTime_ms, m_livenessConfig.keepAliveInterval_ms))
+		{
+			LOGW("session %u could not set TCP keepalive. the connection stays up, but a "
+				"broken path will only be noticed by the idle timeout", m_session->GetSessionID());
+		}
 	}
 
 	if (!m_session->OnConnect())
@@ -1308,6 +1370,21 @@ bool IOCPClient::HandleSystemPacket(ClientSession* session, uint16_t packetId, c
 
 		session->SetClientSessionState(ClientSessionState::ESTABLISHED);
 		LOGI("session %u session established", session->GetSessionID());
+
+		// 여기가 유휴 감시를 켜는 자리다.
+		//
+		// 서버의 하트비트는 established 세션에만 나가므로 그 전에는 잴
+		// 기준이 없다. 그리고 기준이 되는 주기는 서버 설정이라 이 응답에
+		// 실려 온다 — 상수로 복제하면 서버가 주기를 바꾸는 순간 클라가
+		// 멀쩡한 연결을 끊는다.
+		//
+		// 서비스 훅보다 먼저 부른다. OnSessionEstablished 가 오래 붙들려도
+		// 그 사이의 침묵이 감시에서 빠지지 않게 한다.
+		if (m_clientWatchdog)
+		{
+			m_clientWatchdog->Arm(response->heartbeatIntervalMs);
+		}
+
 		OnSessionEstablished(session);
 		return true;
 	}

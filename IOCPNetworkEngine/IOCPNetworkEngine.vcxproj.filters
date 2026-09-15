@@ -39,6 +39,9 @@
     <ClCompile Include="..\Buffer\SendPacketQueue.cpp">
       <Filter>Buffer</Filter>
     </ClCompile>
+    <ClCompile Include="..\Core\ClientWatchdogThread.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
     <ClCompile Include="..\Core\HeartbeatThread.cpp">
       <Filter>Core</Filter>
     </ClCompile>
@@ -118,6 +121,15 @@
     </ClInclude>
     <ClInclude Include="..\Buffer\SharedSendPacket.h">
       <Filter>Buffer</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Core\ClientLivenessConfig.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Core\ClientWatchdogThread.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Core\HeartbeatConfig.h">
+      <Filter>Core</Filter>
     </ClInclude>
     <ClInclude Include="..\Core\HeartbeatThread.h">
       <Filter>Core</Filter>
