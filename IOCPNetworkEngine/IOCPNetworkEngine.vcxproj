@@ -86,6 +86,7 @@
     <ClInclude Include="..\Session\BaseSession.h" />
     <ClInclude Include="..\Session\ClientSession.h" />
     <ClInclude Include="..\Session\ClientSessionPool.h" />
+    <ClInclude Include="..\Session\DisconnectReason.h" />
     <ClInclude Include="..\Session\ISession.h" />
     <ClInclude Include="..\Session\ISessionEvent.h" />
     <ClInclude Include="..\Session\SessionContext.h" />

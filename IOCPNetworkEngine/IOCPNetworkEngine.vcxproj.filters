@@ -224,6 +224,9 @@
     <ClInclude Include="..\Session\ClientSessionPool.h">
       <Filter>Session</Filter>
     </ClInclude>
+    <ClInclude Include="..\Session\DisconnectReason.h">
+      <Filter>Session</Filter>
+    </ClInclude>
     <ClInclude Include="..\Session\ISession.h">
       <Filter>Session</Filter>
     </ClInclude>

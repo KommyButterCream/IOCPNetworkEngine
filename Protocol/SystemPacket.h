@@ -4,6 +4,7 @@
 
 #include "PacketHeader.h"
 #include "PacketID.h"
+#include "../Session/DisconnectReason.h"
 
 // 2 : 인증 응답에 서버의 하트비트 주기를 실었다.
 //
@@ -28,6 +29,28 @@ enum class SYSTEM_AUTH_RESULT : uint16_t
 	// 이 값은 그보다 앞선 여유 구간에서 이유를 알려주기 위한 것이다.
 	SERVER_FULL = 4,
 };
+
+// 인증 결과를 종료 사유로 옮긴다.
+//
+// 둘을 따로 두는 이유는 계층이 다르기 때문이다 — SYSTEM_AUTH_RESULT 는
+// 선로에 나가는 값이라 함부로 못 바꾸고, DisconnectReason 은 서비스에
+// 보여 주는 값이라 인증 말고도 사유가 많다. 그 사이를 여기서 잇는다.
+inline DisconnectReason ToDisconnectReason(SYSTEM_AUTH_RESULT authResult)
+{
+	switch (authResult)
+	{
+	case SYSTEM_AUTH_RESULT::SERVER_FULL:        return DisconnectReason::AuthRejectedServerFull;
+	case SYSTEM_AUTH_RESULT::PROTOCOL_MISMATCH:  return DisconnectReason::AuthRejectedProtocolMismatch;
+	case SYSTEM_AUTH_RESULT::INVALID_STATE:      return DisconnectReason::AuthRejectedInvalidState;
+
+		// SUCCESS 가 여기로 오는 것은 부르는 쪽 실수다. 거절이 아닌 값을
+		// 거절 사유로 바꿀 수는 없으니 뭉뚱그린 값을 돌려준다.
+	case SYSTEM_AUTH_RESULT::SUCCESS:
+	case SYSTEM_AUTH_RESULT::FAILED:
+	default:
+		return DisconnectReason::AuthRejectedOther;
+	}
+}
 
 #pragma pack(push, 1)
 

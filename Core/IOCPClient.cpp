@@ -329,6 +329,7 @@ void IOCPClient::StopClient()
 	//     반드시 IOCPCore::Stop() 보다 먼저 수행되어야 한다.
 	if (m_session)
 	{
+		m_session->NoteDisconnectReason(DisconnectReason::LocalShutdown);
 		OnDisconnectRequest(m_session);
 
 		// 기다리는 자리는 여기 하나로 남겼다.
@@ -455,17 +456,17 @@ void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* se
 		case WSANO_DATA:  // ConnectEx 이전 단계에서 발생된 문제 3
 		case WSAEADDRNOTAVAIL: // 로컬 인터페이스가 해당 주소 패밀리를 지원하지 않을 때
 		case WSAEADDRINUSE: // 중복 포트 바인딩
-			HandleConnectCancelled(overlappedEx, session);
+			HandleConnectCancelled(overlappedEx, session, errorCode);
 			break;
 		case ERROR_OPERATION_ABORTED:
-			HandleConnectCancelled(overlappedEx, session);
+			HandleConnectCancelled(overlappedEx, session, errorCode);
 			break;
 		default:
 			// 분류되지 않은 에러 코드. 그냥 빠져나가면 IncrementIO 로 올려둔
 			// 카운트가 내려가지 않아 이 세션이 영구히 취소 대기에 묶인다.
 			// 취소 처리로 보내 카운트를 정리한다.
 			ENGINE_VIOLATION("session %u unhandled connect error %d, treating it as a cancellation", session->GetSessionID(), errorCode);
-			HandleConnectCancelled(overlappedEx, session);
+			HandleConnectCancelled(overlappedEx, session, errorCode);
 			break;
 		}
 		return;
@@ -492,6 +493,7 @@ void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* se
 		// 남아, 아무것도 받지 못한 채 조용히 멈췄다. 서버 쪽과 같은 결함이다.
 		//
 		// 종료를 먼저 요청하고 카운트는 마지막에 내린다.
+		session->NoteDisconnectReason(DisconnectReason::SocketError);
 		OnDisconnectRequest(session);
 
 		HandleRecvCancelled(overlappedEx, session);
@@ -513,6 +515,7 @@ void IOCPClient::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* se
 		}
 
 		// 송신이 죽은 연결도 마찬가지다. 수신 쪽 주석 참고.
+		session->NoteDisconnectReason(DisconnectReason::SocketError);
 		OnDisconnectRequest(session);
 
 		HandleSendCancelled(overlappedEx, session);
@@ -619,9 +622,9 @@ bool IOCPClient::RunClientConnectSequence()
 	return true;
 }
 
-void IOCPClient::HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSession* clientSession)
+void IOCPClient::HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSession* clientSession, int errorCode)
 {
-	LOGW("ConnectEx was cancelled");
+	LOGW("ConnectEx ended with error %d", errorCode);
 
 	if (!clientSession)
 	{
@@ -635,11 +638,23 @@ void IOCPClient::HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSessio
 	//
 	// 접속이 성립한 적이 없으므로 OnClientConnect 도 부른 적이 없다.
 	// 짝 없는 종료 통지는 서비스 쪽에서 "접속당 하나" 를 세는 코드를
-	// 어긋나게 한다. 접속 실패를 알리고 싶다면 그건 종료가 아니라
-	// 별도의 신호여야 한다.
+	// 어긋나게 한다. 그래서 종료가 아니라 별도의 신호로 알린다.
 	//
-	// 통지가 필요한 경우라면 아래 OnDisconnectRequest 가 부르는
-	// CompleteDisconnect 가 래치를 보고 판단한다.
+	// 예전에는 그 별도 신호가 없었다. 주석에 "별도의 신호여야 한다" 라고
+	// 적어 두고 끝이었고, 그래서 서버가 떠 있지 않으면 서비스는 콜백을
+	// 하나도 받지 못했다 — 재시도를 걸 근거 자체가 없었다.
+	//
+	// ERROR_OPERATION_ABORTED 는 뺀다. 그건 우리가 StopClient 등에서
+	// 건 취소이지 접속 실패가 아니다.
+	if (errorCode != ERROR_OPERATION_ABORTED)
+	{
+		clientSession->NoteDisconnectReason(DisconnectReason::ConnectFailed);
+		OnConnectFailed(errorCode);
+	}
+	else
+	{
+		clientSession->NoteDisconnectReason(DisconnectReason::LocalShutdown);
+	}
 
 	// disconnect 를 먼저 요청하고, ConnectEx 몫의 카운트는 마지막에 내린다.
 	// 순서를 바꾸면 카운트가 0 이 된 사이에 disconnect 가 소켓을 닫고,
@@ -720,6 +735,13 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 			LOGE("session %u recv stream is unusable (%s). dropping the connection",
 				clientSession->GetSessionID(),
 				readResult == PacketReadResult::Invalid ? "invalid packet size" : "packet pool exhausted");
+
+			// 두 사유는 서비스가 할 일이 다르다. 앞쪽은 서버가 이상한
+			// 것이고, 뒤쪽은 우리 풀이 모자란 것이다.
+			clientSession->NoteDisconnectReason(readResult == PacketReadResult::Invalid
+				? DisconnectReason::ProtocolError
+				: DisconnectReason::ResourceExhausted);
+
 			disconnectAfterHandling = true;
 			break;
 		}
@@ -730,6 +752,7 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
 			LOGE("session %u received an invalid packet id %u (size %u). dropping the connection",
 				clientSession->GetSessionID(), packetId, packetSize);
+			clientSession->NoteDisconnectReason(DisconnectReason::ProtocolError);
 			disconnectAfterHandling = true;
 			break;
 		}
@@ -742,7 +765,12 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 
 			if (!handled)
 			{
-				LOGE("session %u engine packet handling failed (PacketID : %u)", clientSession->GetSessionID(), packetId);
+				// 인증 거절 같은 구체적인 사유는 HandleSystemPacket 이 이미
+				// 남겼다. 먼저 쓴 값이 이기므로 이 줄이 덮지 않는다.
+				LOGE("session %u engine packet handling failed (PacketID : %u, %s)",
+					clientSession->GetSessionID(), packetId,
+					ToString(clientSession->GetDisconnectReason()));
+				clientSession->NoteDisconnectReason(DisconnectReason::ProtocolError);
 				disconnectAfterHandling = true;
 				break;
 			}
@@ -754,6 +782,7 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		{
 			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
 			LOGW("session %u service packet received before session established (PacketID : %u)", clientSession->GetSessionID(), packetId);
+			clientSession->NoteDisconnectReason(DisconnectReason::UnexpectedPacket);
 			disconnectAfterHandling = true;
 			break;
 		}
@@ -775,6 +804,7 @@ void IOCPClient::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		{
 			LOGE("session %u failed to post the next recv, disconnecting instead of going silent",
 				clientSession->GetSessionID());
+			clientSession->NoteDisconnectReason(DisconnectReason::ResourceExhausted);
 			disconnectAfterHandling = true;
 		}
 	}
@@ -866,6 +896,7 @@ void IOCPClient::HandleSessionDisconnected(OverlappedEx* overlappedEx, ClientSes
 
 	if (overlappedEx->operation == IO_OPERATION::RECV)
 	{
+		session->NoteDisconnectReason(DisconnectReason::PeerClosed);
 		OnDisconnectRequest(session);
 	}
 	else
@@ -1161,7 +1192,19 @@ void IOCPClient::CompleteDisconnect(ClientSession* clientSession)
 	// 알린 적 있으면 정확히 한 번 알린다.
 	if (clientSession->ConsumeServiceConnectNotified())
 	{
-		OnClientDisconnect(clientSession);
+		// 사유는 세션이 들고 있다. 끊기로 결정한 자리에서 표시해 두고
+		// (BaseSession::NoteDisconnectReason) 통지하는 자리에서 꺼낸다.
+		const DisconnectReason reason = clientSession->GetDisconnectReason();
+
+		// 사정은 서버 쪽 OnSessionDisconnectNotify 의 같은 자리 주석 참고.
+		if (reason == DisconnectReason::Unknown)
+		{
+			LOGW("session %u is being reported as disconnected with no reason recorded. "
+				"some path called disconnect without NoteDisconnectReason",
+				clientSession->GetSessionID());
+		}
+
+		OnClientDisconnect(clientSession, reason);
 	}
 
 	// 소켓을 닫은 이후 세션에 대한 상태 및 정리를 수행
@@ -1359,12 +1402,20 @@ bool IOCPClient::HandleSystemPacket(ClientSession* session, uint16_t packetId, c
 		if (response->protocolVersion != IOCP_ENGINE_PROTOCOL_VERSION)
 		{
 			LOGE("session %u protocol version mismatch (server=%u, client=%u)", session->GetSessionID(), response->protocolVersion, IOCP_ENGINE_PROTOCOL_VERSION);
+			session->NoteDisconnectReason(DisconnectReason::AuthRejectedProtocolMismatch);
 			return false;
 		}
 
 		if (authResult != SYSTEM_AUTH_RESULT::SUCCESS)
 		{
 			LOGW("session %u auth rejected by server (result=%u)", session->GetSessionID(), response->authResult);
+
+			// 서버가 준 거절 사유를 그대로 서비스까지 올린다.
+			//
+			// SERVER_FULL 을 따로 만든 이유가 "RST 만 보면 만석과 장애를
+			// 구분할 수 없다" 였는데, 정작 그 값이 여기서 로그로만 남고
+			// 끝나 서비스는 재접속 여부를 판단할 수 없었다.
+			session->NoteDisconnectReason(ToDisconnectReason(authResult));
 			return false;
 		}
 

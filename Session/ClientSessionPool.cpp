@@ -361,6 +361,7 @@ void ClientSessionPool::DisconnectAllSessions()
 			//
 			// 이 호출은 StopServer 를 부른 스레드(보통 앱 스레드)에서
 			// 실행된다. 운영 중의 통지가 워커 스레드에서 오는 것과 다르다.
+			session->NoteDisconnectReason(DisconnectReason::LocalShutdown);
 			NotifyServiceDisconnect(session);
 
 			if (!session->OnDisconnect())
@@ -497,10 +498,12 @@ uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t 
 		{
 			LOGW("session %u was not reading for %llu ms while sends were still queued, disconnecting",
 				session->GetSessionID(), stalledPeerTimeout_ms);
+			session->NoteDisconnectReason(DisconnectReason::StalledPeer);
 		}
 		else
 		{
 			LOGW("session %u heartbeat timeout, disconnecting", session->GetSessionID());
+			session->NoteDisconnectReason(DisconnectReason::HeartbeatTimeout);
 		}
 		session->MarkHeartbeatTimeout();
 		Release(session);

@@ -3,6 +3,7 @@
 #include "IOCPCore.h"
 #include "ClientLivenessConfig.h"
 #include "../Session/ISessionEvent.h"
+#include "../Session/DisconnectReason.h"
 #include "../Job/JobDefs.h"
 #include "../Buffer/SessionBufferConfig.h"
 #include "../Memory/EnginePoolConfig.h"
@@ -160,7 +161,7 @@ private:
 	// RunAcceptedConnectSequence 와 같다.
 	bool RunClientConnectSequence();
 
-	void HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSession* session);
+	void HandleConnectCancelled(OverlappedEx* overlappedEx, ClientSession* session, int errorCode);
 
 	void HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, DWORD bytesTransferred);
 	void HandleRecvCancelled(OverlappedEx* overlappedEx, ClientSession* session);
@@ -233,7 +234,29 @@ protected:
 
 	virtual void OnClientConnect(ISession* session) {};
 	virtual void OnSessionEstablished(ISession* session) {};
-	virtual void OnClientDisconnect(ISession* session) {};
+
+	// reason 은 이 연결이 왜 끝났는지다.
+	//
+	// 예전에는 인자가 세션 하나뿐이라 서비스가 알 수 있는 것이 "끝났다"
+	// 뿐이었다. 그런데 해야 할 일이 사유마다 정반대다 — 만석이면 잠시 뒤
+	// 다시 붙어야 하고, 버전이 안 맞으면 다시 붙어 봐야 같고, 내가 부른
+	// StopClient 면 아무것도 하면 안 된다. 엔진은 셋을 전부 알면서 로그로만
+	// 남기고 버렸다.
+	//
+	// 재접속 여부만 알면 되면 IsRetryableDisconnect(reason) 를 쓰면 된다.
+	// (값 목록은 Session/DisconnectReason.h)
+	virtual void OnClientDisconnect(ISession* session, DisconnectReason reason) {};
+
+	// 접속 자체가 성립하지 않았다. errorCode 는 WSA 오류 코드다.
+	//
+	// OnClientDisconnect 와 짝이 아니라 별개인 이유는, 접속한 적이 없으면
+	// OnClientConnect 도 부른 적이 없기 때문이다. 짝 없는 종료 통지는
+	// 서비스의 "접속당 하나" 계수를 어긋나게 한다.
+	//
+	// 이게 없던 동안 서버가 떠 있지 않으면 서비스는 콜백을 하나도 받지
+	// 못했다. StartClient 는 ConnectEx 를 건 시점에 true 를 돌려주므로,
+	// 실패를 알 방법도 재시도를 걸 근거도 없었다.
+	virtual void OnConnectFailed(int errorCode) {};
 	virtual void OnReceive(ISession* session, uint16_t packetId, const char* packetData, uint32_t packetSize) {};
 	virtual void OnSend(ISession* session, uint32_t bytesTransferred) {};
 };

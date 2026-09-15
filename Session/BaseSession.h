@@ -4,6 +4,7 @@
 
 #include "ISession.h"
 #include "SessionDefs.h"
+#include "DisconnectReason.h"
 
 #ifdef BUILD_IOCP_ENGINE_DLL
 #define IOCP_ENGINE_API __declspec(dllexport)
@@ -56,6 +57,10 @@ protected:
 	volatile LONG m_clientSessionState = static_cast<LONG>(ClientSessionState::NONE);
 	volatile LONG m_serverSessionState = static_cast<LONG>(ServerSessionState::NONE);
 	volatile LONG m_acceptSessionState = static_cast<LONG>(AcceptSessionState::NONE);
+
+	// 이 세션이 왜 끝났는가. 서비스의 종료 훅으로 그대로 올라간다.
+	// 먼저 쓴 값이 이긴다 (NoteDisconnectReason 주석).
+	volatile LONG m_disconnectReason = static_cast<LONG>(DisconnectReason::Unknown);
 
 	SOCKET m_clientSocket = INVALID_SOCKET;
 
@@ -148,6 +153,33 @@ public:
 
 	// ISession 의 유일한 순수 가상. 서비스가 ISession* 로 부른다.
 	uint32_t GetSessionID() const override { return m_sessionId; }
+
+	// --- 종료 사유 ---
+	//
+	// 끊기로 결정한 자리에서 부른다. 실제로 종료가 일어나는 자리가 아니라
+	// 이유를 아는 자리다. 그 둘은 대개 다르다.
+	//
+	// 먼저 쓴 값이 이긴다. 종료는 연쇄로 일어나기 때문이다 — 프로토콜
+	// 위반으로 끊기로 하면 곧 소켓이 닫히고 걸려 있던 I/O 가 10054 로
+	// 실패한다. 나중 것이 이기면 근본 원인이 매번 SocketError 로 덮인다.
+	void NoteDisconnectReason(DisconnectReason reason)
+	{
+		::InterlockedCompareExchange(&m_disconnectReason,
+			static_cast<LONG>(reason), static_cast<LONG>(DisconnectReason::Unknown));
+	}
+
+	DisconnectReason GetDisconnectReason() const
+	{
+		return static_cast<DisconnectReason>(::InterlockedCompareExchange(
+			const_cast<volatile LONG*>(&m_disconnectReason), 0, 0));
+	}
+
+	// 세션을 재사용하기 전에 되돌린다. 남아 있으면 다음 접속의 종료가
+	// 지난 접속의 사유를 물려받는다.
+	void ClearDisconnectReason()
+	{
+		::InterlockedExchange(&m_disconnectReason, static_cast<LONG>(DisconnectReason::Unknown));
+	}
 
 	// --- I/O 수명 ---
 	//

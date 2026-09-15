@@ -717,6 +717,12 @@ void ClientSession::ResumeReceive()
 		// PostReceive 가 false 를 돌려준다). 그때는 poolState 의 CAS 가
 		// 중복 반납을 걸러내고 "release skipped" 만 남는다.
 		LOGI("session %u could not resume recv, requesting release", sessionIdForLog);
+
+		// 이미 다른 경로가 사유를 남겼으면 그게 이긴다. 취소가 걸려서
+		// PostReceive 가 실패한 경우가 그렇고, 그때 진짜 사유는 취소를
+		// 건 쪽이 알고 있다. 여기 값은 순수하게 자원 문제로 다시 걸지
+		// 못한 경우의 바닥이다.
+		NoteDisconnectReason(DisconnectReason::ResourceExhausted);
 		NotifyDisconnect();
 	}
 	else
@@ -1187,6 +1193,7 @@ void ClientSession::HandleSocketError(int errorCode, IO_OPERATION ioOperation)
 	case ERROR_NETNAME_DELETED: // 네트워크 이름 삭제됨 (연결 끊김)
 		//Log::Info("[Session %u] Connection closed (op=%d, err=%d)", m_sessionId, opType, err);
 		//OnDisconnected();
+		NoteDisconnectReason(DisconnectReason::SocketError);
 		NotifyDisconnect();
 		break;
 
@@ -1208,6 +1215,9 @@ void ClientSession::HandleSocketError(int errorCode, IO_OPERATION ioOperation)
 		break;
 
 	default:
+		// 분류되지 않은 소켓 오류다. 연결이 죽은 것으로 다루므로
+		// 사유도 같게 남긴다.
+		NoteDisconnectReason(DisconnectReason::SocketError);
 		NotifyDisconnect();
 		//Log::Error("[Session %u] Unknown socket error %d (op=%d)", m_sessionId, err, opType);
 		break;

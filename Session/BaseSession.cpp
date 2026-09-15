@@ -42,6 +42,14 @@ void BaseSession::ResetSession()
 	SetServerSessionState(ServerSessionState::NONE);
 	SetAcceptSessionState(AcceptSessionState::NONE);
 
+	// 지난 접속의 종료 사유를 지운다. 남겨 두면 이 슬롯을 다음에 쓰는
+	// 접속이 끝날 때 남의 사유를 물려받는다.
+	//
+	// 서비스 통지보다 뒤여야 한다. ClientSessionPool::CompleteRelease 가
+	// NotifyServiceDisconnect -> OnDisconnect -> ResetSession 순으로 부르므로
+	// 지금 순서는 맞다.
+	ClearDisconnectReason();
+
 	if (m_clientSocket != INVALID_SOCKET)
 	{
 		ENGINE_VIOLATION("session %u reset with a live socket %d. it was not detached",

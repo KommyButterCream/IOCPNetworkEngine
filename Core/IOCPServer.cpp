@@ -553,6 +553,7 @@ void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* se
 		//
 		// 반납을 먼저 예약하고, 카운트는 HandleRecvCancelled 가 마지막에 내린다.
 		// 그 순서여야 우리 몫을 들고 있는 동안 반납이 예약 상태로 머문다.
+		session->NoteDisconnectReason(DisconnectReason::SocketError);
 		m_sessionManager->ReleaseClientSession(session);
 
 		HandleRecvCancelled(overlappedEx, session);
@@ -583,6 +584,7 @@ void IOCPServer::HandleSocketError(OverlappedEx* overlappedEx, ClientSession* se
 		}
 
 		// 송신이 죽은 연결도 마찬가지다. 수신 쪽 주석 참고.
+		session->NoteDisconnectReason(DisconnectReason::SocketError);
 		m_sessionManager->ReleaseClientSession(session);
 
 		HandleSendCancelled(overlappedEx, session);
@@ -890,6 +892,9 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 
 	if (!RunAcceptedConnectSequence(clientSession))
 	{
+		// 시퀀스 안에서 더 구체적인 사유를 남겼으면 그게 이긴다.
+		// 여기 값은 소켓 옵션 실패처럼 사유를 특정하지 못한 경우의 바닥이다.
+		clientSession->NoteDisconnectReason(DisconnectReason::SocketError);
 		m_sessionManager->ReleaseClientSession(clientSession);
 	}
 
@@ -1048,6 +1053,13 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 			LOGE("session %u recv stream is unusable (%s). dropping the session",
 				clientSession->GetSessionID(),
 				readResult == PacketReadResult::Invalid ? "invalid packet size" : "packet pool exhausted");
+
+			// 두 사유는 서비스가 할 일이 다르다. 앞쪽은 피어가 이상한
+			// 것이고, 뒤쪽은 우리 풀이 모자란 것이다.
+			clientSession->NoteDisconnectReason(readResult == PacketReadResult::Invalid
+				? DisconnectReason::ProtocolError
+				: DisconnectReason::ResourceExhausted);
+
 			releaseSessionAfterHandling = true;
 			break;
 		}
@@ -1060,6 +1072,7 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
 			LOGE("session %u received an invalid packet id %u (size %u). dropping the session",
 				clientSession->GetSessionID(), packetId, packetSize);
+			clientSession->NoteDisconnectReason(DisconnectReason::ProtocolError);
 			releaseSessionAfterHandling = true;
 			break;
 		}
@@ -1075,8 +1088,11 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 				// 거절 응답을 이미 보냈다. 오류가 아니므로 ERROR 로 올리지 않고,
 				// 세션은 정리한다. 이게 없으면 거절된 접속이 하트비트
 				// 타임아웃까지 슬롯을 붙든다.
-				LOGI("session %u rejected by the engine (PacketID : %u), releasing it",
-					clientSession->GetSessionID(), packetId);
+				// 사유는 HandleSystemPacket 이 거절을 결정한 자리에서 이미
+				// 남겼다. 어느 거절인지는 거기서만 알 수 있다.
+				LOGI("session %u rejected by the engine (PacketID : %u, %s), releasing it",
+					clientSession->GetSessionID(), packetId,
+					ToString(clientSession->GetDisconnectReason()));
 				releaseSessionAfterHandling = true;
 				break;
 			}
@@ -1084,6 +1100,7 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 			if (systemResult != SystemPacketResult::Ok)
 			{
 				LOGE("session %u engine packet handling failed (PacketID : %u)", clientSession->GetSessionID(), packetId);
+				clientSession->NoteDisconnectReason(DisconnectReason::ProtocolError);
 				releaseSessionAfterHandling = true;
 				break;
 			}
@@ -1095,6 +1112,7 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		{
 			MEMORY_POOL::ReleasePacket(*GetPacketMemoryPool(), *GetGeneralMemoryPool(), packetDataByMemoryPool);
 			LOGW("session %u service packet received before session established (PacketID : %u)", clientSession->GetSessionID(), packetId);
+			clientSession->NoteDisconnectReason(DisconnectReason::UnexpectedPacket);
 			releaseSessionAfterHandling = true;
 			break;
 		}
@@ -1129,6 +1147,7 @@ void IOCPServer::HandleRecv(OverlappedEx* overlappedEx, ClientSession* session, 
 		{
 			LOGE("session %u failed to post the next recv, releasing the session instead of leaving it idle",
 				clientSession->GetSessionID());
+			clientSession->NoteDisconnectReason(DisconnectReason::ResourceExhausted);
 			releaseSessionAfterHandling = true;
 		}
 	}
@@ -1233,6 +1252,8 @@ void IOCPServer::HandleSessionDisconnected(OverlappedEx* overlappedEx, ClientSes
 		// 끝난 세션만 통지를 받았고, RST / 하트비트 타임아웃 / 파싱 실패 /
 		// 접속 시퀀스 실패 / 서버 종료로 끝난 세션은 아무 말 없이 사라졌다.
 		// 이제 반납이 실제로 일어나는 곳(ClientSessionPool)에서 한 번 부른다.
+
+		session->NoteDisconnectReason(DisconnectReason::PeerClosed);
 
 		// 반납을 먼저 요청하고 카운트는 마지막에 내린다.
 		//
@@ -1766,7 +1787,26 @@ uint32_t IOCPServer::GetOutstandingIOCount() const
 
 void IOCPServer::OnSessionDisconnectNotify(void* context, ClientSession* session)
 {
-	static_cast<IOCPServer*>(context)->OnClientDisconnect(session);
+	// 사유는 세션이 들고 있다. 끊기로 결정한 자리에서 표시해 두고
+	// (BaseSession::NoteDisconnectReason) 통지하는 자리에서 꺼낸다.
+	// 결정 지점이 여러 갈래라 인자로 실어 나르면 모든 경로의 시그니처가
+	// 바뀌는데, 정작 알아야 하는 것은 이 한 자리뿐이다.
+	const DisconnectReason reason = session->GetDisconnectReason();
+
+	// Unknown 이 서비스까지 올라왔다는 것은 종료 경로 하나가 표시를
+	// 빠뜨렸다는 뜻이다. 서비스 잘못이 아니라 엔진 쪽 누락이므로 남긴다.
+	//
+	// 위반으로 올리지는 않는다 — 기능은 정상 동작하고(서비스는 "끝났다"
+	// 까지는 안다) 새 경로가 추가될 때 조용히 생기는 종류의 구멍이라,
+	// 죽이는 것보다 눈에 띄게 두는 편이 낫다.
+	if (reason == DisconnectReason::Unknown)
+	{
+		LOGW("session %u is being reported as disconnected with no reason recorded. "
+			"some path called release without NoteDisconnectReason",
+			session->GetSessionID());
+	}
+
+	static_cast<IOCPServer*>(context)->OnClientDisconnect(session, reason);
 }
 
 uint32_t IOCPServer::GetPeakJobQueueDepth() const
@@ -1983,12 +2023,14 @@ IOCPServer::SystemPacketResult IOCPServer::HandleSystemPacket(ClientSession* ses
 		if (authState != ServerSessionState::CONNECTED &&
 			authState != ServerSessionState::AUTH_PENDING)
 		{
+			session->NoteDisconnectReason(DisconnectReason::AuthRejectedInvalidState);
 			SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::INVALID_STATE);
 			return SystemPacketResult::Rejected;
 		}
 
 		if (request->protocolVersion != IOCP_ENGINE_PROTOCOL_VERSION)
 		{
+			session->NoteDisconnectReason(DisconnectReason::AuthRejectedProtocolMismatch);
 			SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::PROTOCOL_MISMATCH);
 			return SystemPacketResult::Rejected;
 		}
@@ -2007,6 +2049,7 @@ IOCPServer::SystemPacketResult IOCPServer::HandleSystemPacket(ClientSession* ses
 				LOGW("session %u rejected : service capacity reached (%u in use, limit %u)",
 					session->GetSessionID(), inUse, m_connectionPolicy.serviceCapacity);
 
+				session->NoteDisconnectReason(DisconnectReason::AuthRejectedServerFull);
 				SendSystemAuthResponse(session, SYSTEM_AUTH_RESULT::SERVER_FULL);
 
 				return SystemPacketResult::Rejected;

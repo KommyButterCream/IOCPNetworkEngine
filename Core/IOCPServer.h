@@ -294,7 +294,14 @@ protected:
 
 protected:
 	virtual void OnClientConnect(ISession* session) = 0;
-	virtual void OnClientDisconnect(ISession* session) = 0;
+
+	// reason 은 이 세션이 왜 끝났는지다.
+	//
+	// 예전에는 인자가 세션 하나뿐이라 서비스가 알 수 있는 것이 "끝났다"
+	// 뿐이었다. 만석 거절과 프로토콜 위반과 하트비트 타임아웃과 서버 종료가
+	// 같은 신호로 도착했고, 엔진은 넷을 전부 알면서 로그로만 남기고 버렸다.
+	// (값 목록은 Session/DisconnectReason.h)
+	virtual void OnClientDisconnect(ISession* session, DisconnectReason reason) = 0;
 	virtual void OnReceive(ISession* session, uint16_t packetId, const char* packetData, uint32_t packetSize) = 0;
 	virtual void OnSend(ISession* session, uint32_t bytesTransferred) = 0;
 };
