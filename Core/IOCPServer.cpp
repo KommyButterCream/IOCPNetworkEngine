@@ -86,7 +86,7 @@ IOCPServer::~IOCPServer()
 	DestroyMemoryPools();
 }
 
-bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount, const SessionBufferConfig& bufferConfig, const ConnectionPolicyConfig& policyConfig, const EnginePoolConfig& poolConfig)
+bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount, const SessionBufferConfig& bufferConfig, const ConnectionPolicyConfig& policyConfig, const EnginePoolConfig& poolConfig, const HeartbeatConfig& heartbeatConfig)
 {
 	// 설정 오류는 아무것도 잡기 전에 걸러낸다. 세션 생성 단계까지 끌고 가면
 	// 세션을 하나도 못 잡는 서버가 정상 기동한 것처럼 보인다.
@@ -107,7 +107,18 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		return false;
 	}
 
+	// 하트비트도 다른 설정과 같은 자리에서 걸러낸다. 타임아웃이 점검 주기보다
+	// 짧으면 첫 주기에 전 세션이 좀비로 판정된다.
+	if (!heartbeatConfig.IsValid())
+	{
+		LOGE("invalid heartbeat config : interval %llu ms, timeout %llu ms, stalled peer timeout %llu ms",
+			heartbeatConfig.checkInterval_ms, heartbeatConfig.timeout_ms,
+			heartbeatConfig.stalledPeerTimeout_ms);
+		return false;
+	}
+
 	m_connectionPolicy = policyConfig;
+	m_heartbeatConfig = heartbeatConfig;
 
 	// 지난 주기의 한 번짜리 래치를 되돌린다.
 	//
@@ -240,13 +251,11 @@ bool IOCPServer::StartServer(const char* ipAddress, const uint16_t port, const u
 		return false;
 	}
 
-	constexpr uint64_t HeartbeatCheckInterval_ms = 5'000;
-	constexpr uint64_t HeartbeatTimeout_ms = 15'000;
 	// 걸기가 실패해 비어 버린 accept 슬롯을 다시 post 하는 일을 이 스레드의
 	// 주기에 얹는다. 실패한 슬롯은 스스로 복구되지 않으므로 (다음 PostAccept 를
 	// 부를 완료 통지가 애초에 그 실패한 걸기의 것이다) 누군가 다시 걸어 주어야
 	// 한다. 자세한 이유는 AcceptRepostFunc 선언부 주석에 있다.
-	m_heartbeatThread = new HeartbeatThread(m_sessionManager, HeartbeatCheckInterval_ms, HeartbeatTimeout_ms,
+	m_heartbeatThread = new HeartbeatThread(m_sessionManager, heartbeatConfig,
 		[](void* context) { static_cast<IOCPServer*>(context)->RefillAcceptSlots(); }, this);
 	if (!m_heartbeatThread)
 	{
@@ -1933,6 +1942,12 @@ bool IOCPServer::SendSystemAuthResponse(ClientSession* session, SYSTEM_AUTH_RESU
 	SC_SYSTEM_AUTH_RESPONSE_PACKET* response = reinterpret_cast<SC_SYSTEM_AUTH_RESPONSE_PACKET*>(memory);
 	*response = SC_SYSTEM_AUTH_RESPONSE_PACKET();
 	response->authResult = static_cast<uint16_t>(authResult);
+
+	// 클라이언트의 유휴 타임아웃이 이 값에서 파생된다. 타임아웃이 0 이면
+	// 이 서버는 좀비 정리를 하지 않는다는 뜻이므로 주기도 알릴 필요가 없다.
+	response->heartbeatIntervalMs = (m_heartbeatConfig.timeout_ms != 0)
+		? static_cast<uint32_t>(m_heartbeatConfig.checkInterval_ms)
+		: 0;
 
 	void* packetData = response;
 	if (!session->EnqueueSendPacket(&packetData, sizeof(SC_SYSTEM_AUTH_RESPONSE_PACKET)))

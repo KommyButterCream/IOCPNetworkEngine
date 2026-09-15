@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "IOCPCore.h"
+#include "HeartbeatConfig.h"
 #include "../Job/JobDefs.h"
 #include "../Protocol/SystemPacket.h"
 #include "../Buffer/SessionBufferConfig.h"
@@ -45,10 +46,16 @@ public:
 	//
 	// 기본값은 예전에 박혀 있던 값 그대로이므로, 넘기지 않으면 동작이 바뀌지
 	// 않는다. (값과 조정 방법은 Memory/EnginePoolConfig.h 참고)
+	//
+	// heartbeatConfig 는 세션이 살아 있는지 묻는 주기와 답을 기다리는 시간이다.
+	// 예전에는 StartServer 안에 상수 두 개로 박혀 있었고, 그래서 실시간
+	// 서비스가 15초짜리 침묵을 줄일 방법이 없었다. 기본값은 예전 값 그대로다.
+	// (값과 세 번째 항목의 사정은 Core/HeartbeatConfig.h 참고)
 	bool StartServer(const char* ipAddress, const uint16_t port, const uint32_t maxConnectionCount,
 		const SessionBufferConfig& bufferConfig = SessionBufferPreset::Server(),
 		const ConnectionPolicyConfig& policyConfig = ConnectionPolicyConfig(),
-		const EnginePoolConfig& poolConfig = EnginePoolPreset::Server());
+		const EnginePoolConfig& poolConfig = EnginePoolPreset::Server(),
+		const HeartbeatConfig& heartbeatConfig = HeartbeatConfig());
 	void StopServer();
 
 private:
@@ -101,6 +108,11 @@ private:
 
 	// 접속 수용 정책. StartServer 에서 받아 보관한다.
 	ConnectionPolicyConfig m_connectionPolicy;
+
+	// 하트비트 설정. 스레드에 넘기고 끝이 아니라 여기에도 남긴다 —
+	// 인증 응답에 주기를 실어 보내야 하기 때문이다.
+	// (왜 클라가 그 값을 알아야 하는지는 SC_SYSTEM_AUTH_RESPONSE_PACKET 주석)
+	HeartbeatConfig m_heartbeatConfig;
 
 private:
 	// for AcceptEX

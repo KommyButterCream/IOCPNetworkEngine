@@ -84,7 +84,10 @@ public:
 	bool WaitForAllRecvSendIOCancelComplete(const uint32_t timeout_ms);
 	void DisconnectAllSessions();
 	uint32_t SendHeartbeatRequests();
-	uint32_t DisconnectZombieSessions(uint64_t nowTick, uint64_t heartbeatTimeout_ms, uint64_t releaseBudget_ms);
+	// stalledPeerTimeout_ms 는 "우리 송신이 밀려 있는" 세션에만 적용하는 더 긴
+	// 타임아웃이다. 왜 두 개를 두는지는 HeartbeatConfig 주석 참고.
+	uint32_t DisconnectZombieSessions(uint64_t nowTick, uint64_t heartbeatTimeout_ms,
+		uint64_t stalledPeerTimeout_ms, uint64_t releaseBudget_ms);
 
 	// Session Close 함수 포인터 설정
 	// closesocket 을 하나의 함수에서만 수행되도록 강제!

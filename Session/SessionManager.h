@@ -81,7 +81,8 @@ public:
 	void DisconnectAllSessions();
 	uint32_t SendHeartbeatRequests();
 
-	uint32_t DisconnectZombieSessions(uint64_t heartbeatTimeout_ms, uint64_t releaseBudget_ms);
+	uint32_t DisconnectZombieSessions(uint64_t heartbeatTimeout_ms,
+		uint64_t stalledPeerTimeout_ms, uint64_t releaseBudget_ms);
 
 	void OnDisconnectRequest(ISession* session) override;
 };

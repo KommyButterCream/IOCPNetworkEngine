@@ -404,11 +404,18 @@ uint32_t ClientSessionPool::SendHeartbeatRequests()
 	return sentCount;
 }
 
-uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t heartbeatTimeout_ms, uint64_t releaseBudget_ms)
+uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t heartbeatTimeout_ms,
+	uint64_t stalledPeerTimeout_ms, uint64_t releaseBudget_ms)
 {
 	if (!m_sessions || heartbeatTimeout_ms == 0)
 	{
 		return 0;
+	}
+
+	// 유예를 주지 않기로 했다면(0) 본 타임아웃을 그대로 쓴다.
+	if (stalledPeerTimeout_ms < heartbeatTimeout_ms)
+	{
+		stalledPeerTimeout_ms = heartbeatTimeout_ms;
 	}
 
 	const uint64_t passBeginTick = ::GetTickCount64();
@@ -437,6 +444,30 @@ uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t 
 			continue;
 		}
 
+		// 본 타임아웃은 넘겼다. 이제 이 침묵이 죽은 것인지 느린 것인지 가른다.
+		//
+		// 우리 송신이 밀려 있다는 것은 상대의 TCP 수신 윈도가 닫혀 있다는
+		// 뜻이고, 윈도를 닫아 두려면 상대의 커널이 살아서 ACK 를 하고 있어야
+		// 한다. 즉 "느리지만 살아 있다" 는 증거다. 죽은 상대는 윈도를 닫아
+		// 주지 못한다 — 재전송이 쌓이다가 소켓 오류로 끝나고, 그건 이 주기가
+		// 아니라 HandleSocketError 가 처리한다.
+		//
+		// 실측 : 클라 잡 큐를 recvPauseJobDepth(256)까지 채워 25초 멈춰 두면
+		// 정상 동작 중인 세션이 정확히 15초에 끊겼다. (tools/bpzombie)
+		// 백프레셔는 "유실도 끊김도 없이 속도만 맞춘다" 가 목적인데, 느린
+		// 소비자를 살리려는 장치가 느린 소비자를 죽이고 있었다.
+		//
+		// 무한정 봐주지는 않는다. 이유는 HeartbeatConfig 주석 참고.
+		//
+		// HasPendingSend 는 락을 잡으므로 본 타임아웃을 넘긴 세션에서만
+		// 부른다. 정상 세션은 위 한 줄에서 걸러진다.
+		const bool stalledPeer = session->HasPendingSend();
+
+		if (stalledPeer && !session->IsHeartbeatTimedOut(nowTick, stalledPeerTimeout_ms))
+		{
+			continue;
+		}
+
 		// 여기서부터가 막힐 수 있는 구간이다.
 		
 		// Release 안에는 최대 10초짜리 WaitForIOCancelComplete 가 있고,
@@ -459,7 +490,18 @@ uint32_t ClientSessionPool::DisconnectZombieSessions(uint64_t nowTick, uint64_t 
 			break;
 		}
 
-		LOGW("session %u heartbeat timeout, disconnecting", session->GetSessionID());
+		// 두 사유를 구분해서 남긴다. 앞쪽은 상대가 사라진 것이고, 뒤쪽은
+		// 상대가 살아는 있으나 유예 시간 내내 읽지 않은 것이다. 운영에서
+		// 해야 할 일이 다르다.
+		if (stalledPeer)
+		{
+			LOGW("session %u was not reading for %llu ms while sends were still queued, disconnecting",
+				session->GetSessionID(), stalledPeerTimeout_ms);
+		}
+		else
+		{
+			LOGW("session %u heartbeat timeout, disconnecting", session->GetSessionID());
+		}
 		session->MarkHeartbeatTimeout();
 		Release(session);
 		++disconnectedCount;

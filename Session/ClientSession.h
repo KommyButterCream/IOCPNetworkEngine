@@ -146,6 +146,15 @@ public:
 	const SendPacketQueue* GetSendPacketQueue() const;
 	SendPacketQueue* GetSendPacketQueue();
 
+	// 아직 상대에게 다 건네지 못한 송신이 남아 있는가.
+	//
+	// 큐에 밀려 있거나 WSASend 가 걸려 있으면 참이다. 이건 단순한 수위
+	// 조회가 아니라 "상대의 수신 윈도가 닫혀 있다" 는 관측이다 — 윈도를
+	// 닫아 두려면 상대의 커널이 살아서 ACK 를 하고 있어야 하므로, 침묵한
+	// 세션이 죽은 것인지 느린 것인지 가르는 유일한 단서가 된다.
+	// (쓰는 곳은 ClientSessionPool::DisconnectZombieSessions)
+	bool HasPendingSend() const;
+
 	SessionJobQueue& GetJobQueue() const;
 
 	// 잡 큐 수위. 큐 객체가 없는 상태(초기화 전/정리 후)에서도 안전하다.

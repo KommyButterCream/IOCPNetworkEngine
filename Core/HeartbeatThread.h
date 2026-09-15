@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include "HeartbeatConfig.h"
 #include "../../Core/Concurrency/ThreadBase.h"
 
 class SessionManager;
@@ -29,7 +30,7 @@ typedef void (*AcceptRepostFunc)(void* context);
 class HeartbeatThread final : public Core::Concurrency::ThreadBase
 {
 public:
-	HeartbeatThread(SessionManager* sessionManager, uint64_t checkInterval_ms, uint64_t heartbeatTimeout_ms,
+	HeartbeatThread(SessionManager* sessionManager, const HeartbeatConfig& config,
 		AcceptRepostFunc acceptRepostFunc = nullptr, void* acceptRepostContext = nullptr);
 	~HeartbeatThread() override = default;
 
@@ -46,6 +47,10 @@ private:
 	SessionManager* m_sessionManager = nullptr;
 	uint64_t m_checkInterval_ms = 0;
 	uint64_t m_heartbeatTimeout_ms = 0;
+
+	// 송신이 밀려 있는 세션에만 쓰는 더 긴 타임아웃.
+	// (HeartbeatConfig::stalledPeerTimeout_ms 주석 참고)
+	uint64_t m_stalledPeerTimeout_ms = 0;
 
 	AcceptRepostFunc m_acceptRepostFunc = nullptr;
 	void* m_acceptRepostContext = nullptr;

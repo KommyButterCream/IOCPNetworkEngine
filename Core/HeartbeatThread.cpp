@@ -9,13 +9,14 @@
 
 using namespace Core::Util;
 
-HeartbeatThread::HeartbeatThread(SessionManager* sessionManager, uint64_t checkInterval_ms, uint64_t heartbeatTimeout_ms,
+HeartbeatThread::HeartbeatThread(SessionManager* sessionManager, const HeartbeatConfig& config,
 	AcceptRepostFunc acceptRepostFunc, void* acceptRepostContext)
 	: ThreadBase(L"HeartbeatThread")
 {
 	m_sessionManager = sessionManager;
-	m_checkInterval_ms = checkInterval_ms;
-	m_heartbeatTimeout_ms = heartbeatTimeout_ms;
+	m_checkInterval_ms = config.checkInterval_ms;
+	m_heartbeatTimeout_ms = config.timeout_ms;
+	m_stalledPeerTimeout_ms = config.EffectiveStalledTimeout();
 	m_acceptRepostFunc = acceptRepostFunc;
 	m_acceptRepostContext = acceptRepostContext;
 }
@@ -100,7 +101,8 @@ void HeartbeatThread::Run()
 		// 상한은 점검 주기에서 따온다 — 주기가 바뀌면 같이 바뀌어야 한다.
 		const uint64_t zombieReleaseBudget_ms = m_checkInterval_ms / 4;
 
-		const uint32_t disconnectedCount = m_sessionManager->DisconnectZombieSessions(m_heartbeatTimeout_ms, zombieReleaseBudget_ms);
+		const uint32_t disconnectedCount = m_sessionManager->DisconnectZombieSessions(
+			m_heartbeatTimeout_ms, m_stalledPeerTimeout_ms, zombieReleaseBudget_ms);
 		if (disconnectedCount > 0)
 		{
 			LOGW("disconnected %u zombie sessions (timeout %llu ms)", disconnectedCount, m_heartbeatTimeout_ms);

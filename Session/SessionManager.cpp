@@ -237,14 +237,16 @@ uint32_t SessionManager::SendHeartbeatRequests()
 	return m_clientSessionPool->SendHeartbeatRequests();
 }
 
-uint32_t SessionManager::DisconnectZombieSessions(uint64_t heartbeatTimeout_ms, uint64_t releaseBudget_ms)
+uint32_t SessionManager::DisconnectZombieSessions(uint64_t heartbeatTimeout_ms,
+	uint64_t stalledPeerTimeout_ms, uint64_t releaseBudget_ms)
 {
 	if (!m_clientSessionPool || heartbeatTimeout_ms == 0)
 	{
 		return 0;
 	}
 
-	return m_clientSessionPool->DisconnectZombieSessions(::GetTickCount64(), heartbeatTimeout_ms, releaseBudget_ms);
+	return m_clientSessionPool->DisconnectZombieSessions(::GetTickCount64(), heartbeatTimeout_ms,
+		stalledPeerTimeout_ms, releaseBudget_ms);
 }
 
 void SessionManager::OnDisconnectRequest(ISession* session)

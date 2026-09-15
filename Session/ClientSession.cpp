@@ -469,6 +469,22 @@ SendPacketQueue* ClientSession::GetSendPacketQueue()
 	return m_sendPacketQueue;
 }
 
+bool ClientSession::HasPendingSend() const
+{
+	// 걸려 있는 WSASend 를 먼저 본다. 큐가 비었어도 마지막 한 건이
+	// 나가는 중일 수 있고, 그 한 건이 바로 "상대가 안 읽고 있다" 는
+	// 상태일 수 있다.
+	if (::InterlockedCompareExchange(const_cast<volatile LONG*>(&m_sending), 0, 0) != 0)
+		return true;
+
+	// 초기화 전/정리 후에도 안전해야 한다. 이 함수는 세션 배열을 훑는
+	// 주기 점검에서 불리므로 사용 중이 아닌 슬롯도 들어온다.
+	if (m_sendPacketQueue == nullptr)
+		return false;
+
+	return !m_sendPacketQueue->IsEmpty();
+}
+
 SessionJobQueue& ClientSession::GetJobQueue() const
 {
 	return *m_jobQueue;
