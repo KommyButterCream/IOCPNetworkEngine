@@ -622,7 +622,7 @@ void IOCPServer::HandleAccept(uint32_t sessionId, DWORD bytesTransferred)
 	// 감소를 고갈로 오해하지 않는다.
 	::InterlockedDecrement(&m_postedAcceptCount);
 
-	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
+	if (::ReadAcquire(&m_serverShutdownRequested) == TRUE)
 	{
 		IOCPCore::CloseSocketHandle(acceptSession->DetachSocket());
 
@@ -907,7 +907,7 @@ bool IOCPServer::RunAcceptedConnectSequence(ClientSession* clientSession)
 {
 	LOGT("session %u running the server-side connect sequence", clientSession->GetSessionID());
 
-	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
+	if (::ReadAcquire(&m_serverShutdownRequested) == TRUE)
 	{
 		// 이미 서버가 Shutdown 모드면 이 Accept 결과는 버린다.
 		return false;
@@ -1550,7 +1550,7 @@ bool IOCPServer::PostAccept(AcceptSession* acceptSession)
 
 	LOGT("accept session %u posting AcceptEx", acceptSession->GetSessionID());
 
-	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
+	if (::ReadAcquire(&m_serverShutdownRequested) == TRUE)
 	{
 		// 이미 서버가 Shutdown 모드면 이 Accept 결과는 버린다.
 
@@ -1609,7 +1609,7 @@ bool IOCPServer::PostAccept(AcceptSession* acceptSession)
 		// 슬롯 상태와 무관하게 항상 서 있다.
 		acceptSession->IncrementIO();
 
-		if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
+		if (::ReadAcquire(&m_serverShutdownRequested) == TRUE)
 		{
 			LOGI("accept session %u declining to post AcceptEx : the server is shutting down",
 				acceptSession->GetSessionID());
@@ -1708,7 +1708,7 @@ void IOCPServer::RefillAcceptSlots()
 	if (!m_sessionManager)
 		return;
 
-	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
+	if (::ReadAcquire(&m_serverShutdownRequested) == TRUE)
 		return;
 
 	const uint32_t slotCount = m_sessionManager->GetAcceptSessionCount();
@@ -1751,10 +1751,10 @@ void IOCPServer::RefillAcceptSlots()
 
 void IOCPServer::ReportAcceptStarvationIfNeeded()
 {
-	if (::InterlockedCompareExchange(&m_serverShutdownRequested, 0, 0) == TRUE)
+	if (::ReadAcquire(&m_serverShutdownRequested) == TRUE)
 		return;
 
-	if (::InterlockedCompareExchange(&m_postedAcceptCount, 0, 0) != 0)
+	if (::ReadAcquire(&m_postedAcceptCount) != 0)
 		return;
 
 	// 같은 고갈에 대해 한 번만 울린다. RefillAcceptSlots 가 성공하면 풀린다.
@@ -1766,8 +1766,7 @@ void IOCPServer::ReportAcceptStarvationIfNeeded()
 
 uint32_t IOCPServer::GetPostedAcceptCount() const
 {
-	const LONG count = ::InterlockedCompareExchange(
-		const_cast<volatile LONG*>(&m_postedAcceptCount), 0, 0);
+	const LONG count = ::ReadAcquire(&m_postedAcceptCount);
 
 	return count < 0 ? 0 : static_cast<uint32_t>(count);
 }

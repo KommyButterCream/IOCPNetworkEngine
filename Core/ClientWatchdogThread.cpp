@@ -52,7 +52,7 @@ void ClientWatchdogThread::Disarm()
 
 bool ClientWatchdogThread::HasFiredTimeout() const
 {
-	return ::InterlockedCompareExchange(const_cast<volatile LONG*>(&m_fired), 0, 0) != 0;
+	return ::ReadAcquire(&m_fired) != 0;
 }
 
 void ClientWatchdogThread::Run()
@@ -60,7 +60,7 @@ void ClientWatchdogThread::Run()
 	while (!IsStopRequested())
 	{
 		const uint64_t timeout_ms =
-			static_cast<uint64_t>(::InterlockedCompareExchange64(&m_idleTimeout_ms, 0, 0));
+			static_cast<uint64_t>(::ReadAcquire64(&m_idleTimeout_ms));
 
 		// 무장 전에는 짧게 돌면서 무장을 기다린다. 무장은 인증 응답이
 		// 도착한 뒤에 일어나므로 여기서는 기다리는 것 말고 할 일이 없다.
@@ -90,7 +90,7 @@ void ClientWatchdogThread::Run()
 
 		// 대기 중에 무장이 풀렸을 수 있다. 다시 읽는다.
 		const uint64_t armed_ms =
-			static_cast<uint64_t>(::InterlockedCompareExchange64(&m_idleTimeout_ms, 0, 0));
+			static_cast<uint64_t>(::ReadAcquire64(&m_idleTimeout_ms));
 
 		if (armed_ms == 0 || m_session == nullptr)
 		{

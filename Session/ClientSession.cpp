@@ -474,7 +474,7 @@ bool ClientSession::HasPendingSend() const
 	// 걸려 있는 WSASend 를 먼저 본다. 큐가 비었어도 마지막 한 건이
 	// 나가는 중일 수 있고, 그 한 건이 바로 "상대가 안 읽고 있다" 는
 	// 상태일 수 있다.
-	if (::InterlockedCompareExchange(const_cast<volatile LONG*>(&m_sending), 0, 0) != 0)
+	if (::ReadAcquire(&m_sending) != 0)
 		return true;
 
 	// 초기화 전/정리 후에도 안전해야 한다. 이 함수는 세션 배열을 훑는
@@ -687,7 +687,7 @@ bool ClientSession::PostReceiveOrPause()
 void ClientSession::ResumeReceiveIfDrained()
 {
 	// 대부분의 호출이 여기서 끝난다. 멈춰 있지 않으면 원자 읽기 하나가 전부다.
-	if (::InterlockedCompareExchange(&m_recvPaused, 0, 0) == 0)
+	if (::ReadAcquire(&m_recvPaused) == 0)
 		return;
 
 	if (GetJobQueueDepth() > m_bufferConfig.recvResumeJobDepth)
@@ -754,16 +754,14 @@ void ClientSession::ReleaseUnpostedIO()
 
 uint32_t ClientSession::GetRecvPauseCount() const
 {
-	const LONG count = ::InterlockedCompareExchange(
-		const_cast<volatile LONG*>(&m_recvPauseCount), 0, 0);
+	const LONG count = ::ReadAcquire(&m_recvPauseCount);
 
 	return (count > 0) ? static_cast<uint32_t>(count) : 0;
 }
 
 bool ClientSession::IsReceivePaused() const
 {
-	return ::InterlockedCompareExchange(
-		const_cast<volatile LONG*>(&m_recvPaused), 0, 0) == 1;
+	return ::ReadAcquire(&m_recvPaused) == 1;
 }
 
 bool ClientSession::TrySendNext()
@@ -1004,7 +1002,7 @@ bool ClientSession::ShouldLogSendReject(SendRejectReason reason, uint32_t& outSu
 	constexpr LONGLONG WindowMs = 1000;
 
 	const LONGLONG now = static_cast<LONGLONG>(::GetTickCount64());
-	const LONGLONG last = ::InterlockedCompareExchange64(&m_sendRejectLogTick[index], 0, 0);
+	const LONGLONG last = ::ReadAcquire64(&m_sendRejectLogTick[index]);
 
 	// 창이 아직 안 지났다. 삼키고 세기만 한다.
 	if (last != 0 && (now - last) < WindowMs)
@@ -1336,12 +1334,12 @@ void ClientSession::UpdateLastHeartbeatTick()
 
 uint64_t ClientSession::GetLastRecvTick() const
 {
-	return static_cast<uint64_t>(::InterlockedCompareExchange64(const_cast<volatile LONGLONG*>(&m_lastRecvTick), 0, 0));
+	return static_cast<uint64_t>(::ReadAcquire64(&m_lastRecvTick));
 }
 
 uint64_t ClientSession::GetLastHeartbeatTick() const
 {
-	return static_cast<uint64_t>(::InterlockedCompareExchange64(const_cast<volatile LONGLONG*>(&m_lastHeartbeatTick), 0, 0));
+	return static_cast<uint64_t>(::ReadAcquire64(&m_lastHeartbeatTick));
 }
 
 uint64_t ClientSession::GetLastActiveTick() const

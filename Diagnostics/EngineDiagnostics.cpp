@@ -24,7 +24,7 @@ namespace Engine
 
 		uint64_t GetViolationCount()
 		{
-			return static_cast<uint64_t>(::InterlockedCompareExchange64(&g_violationCount, 0, 0));
+			return static_cast<uint64_t>(::ReadAcquire64(&g_violationCount));
 		}
 
 		void ResetViolationCount()

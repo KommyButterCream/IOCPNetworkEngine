@@ -64,7 +64,7 @@ void BaseSession::ResetSession()
 	//
 	// 카운트를 그대로 두면 늦게 도착한 DecrementIO 가 정상적으로 0 으로 내려간다.
 	// 0 이 아닌 상태로 여기 도달한 것 자체가 버그이므로 크게 남긴다.
-	const LONG remainingIo = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
+	const LONG remainingIo = ::ReadAcquire(&m_ioCount);
 	if (remainingIo != 0)
 	{
 		ENGINE_VIOLATION("session %u reset while %ld IO operations are still outstanding. the counter is left as is so a late DecrementIO does not go negative",
@@ -101,7 +101,7 @@ void BaseSession::Finalize()
 	// 통지는 버려진다. 그러면 그 몫의 DecrementIO 가 영영 실행되지 않아
 	// 카운트가 0 이 아닌 상태로 여기 도달한다.
 	// 종료 경로이므로 치명적이지 않다. 남기고 계속 진행한다.
-	const LONG remainingIo = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
+	const LONG remainingIo = ::ReadAcquire(&m_ioCount);
 	if (remainingIo != 0)
 	{
 		ENGINE_VIOLATION("session %u finalized while %ld IO operations are still outstanding. completions were most likely dropped when the IOCP stopped",
@@ -166,7 +166,7 @@ void BaseSession::DecrementIO()
 
 	// 여기부터는 마지막 I/O 소유권을 방금 내려놓은 스레드다.
 
-	if (::InterlockedCompareExchange(&m_cancelIo, 0, 0) == 1 && m_ioCancelCompleteEvent)
+	if (::ReadAcquire(&m_cancelIo) == 1 && m_ioCancelCompleteEvent)
 	{
 		LOGI("session %u all pending IO cancelled", GetSessionID());
 		::SetEvent(m_ioCancelCompleteEvent);
@@ -197,9 +197,15 @@ bool BaseSession::RequestRelease()
 	// DecrementIO 가 지나가 버리는 창이 생긴다. 그 스레드는 예약을 보지
 	// 못해 그냥 돌아가고, 이쪽은 "남은 I/O 가 있으니 저쪽이 하겠지" 로
 	// 판단해 돌아간다. 아무도 반납하지 않는 세션이 남는다.
+	//
+	// 이 store 는 InterlockedExchange 여야 한다. 아래 읽기는 ReadAcquire 라
+	// StoreLoad 를 막지 못하고, 그 순서를 세워 주는 것이 이 lock 접두 명령
+	// 하나뿐이다. WriteRelease 같은 것으로 바꾸면 아래 읽기가 이 store 앞으로
+	// 올라갈 수 있고, 그러면 양쪽이 서로를 못 보는 창이 열린다.
+	// (반대편 DecrementIO 도 같은 이유로 InterlockedDecrement 여야 한다)
 	::InterlockedExchange(&m_releasePending, 1);
 
-	if (::InterlockedCompareExchange(&m_ioCount, 0, 0) != 0)
+	if (::ReadAcquire(&m_ioCount) != 0)
 	{
 		// 아직 완료되지 않은 I/O 가 있다. 이 시점에 카운트가 0 이 아니었다면
 		// 0 으로 내리는 DecrementIO 가 반드시 이 뒤에 오고, 그 스레드는
@@ -214,14 +220,12 @@ bool BaseSession::RequestRelease()
 
 bool BaseSession::IsReleasePending() const
 {
-	return (::InterlockedCompareExchange(
-		const_cast<volatile LONG*>(&m_releasePending), 0, 0) == 1);
+	return (::ReadAcquire(&m_releasePending) == 1);
 }
 
 LONG BaseSession::GetOutstandingIOCount() const
 {
-	return ::InterlockedCompareExchange(
-		const_cast<volatile LONG*>(&m_ioCount), 0, 0);
+	return ::ReadAcquire(&m_ioCount);
 }
 
 bool BaseSession::CancelPendingIO()
@@ -238,7 +242,7 @@ bool BaseSession::CancelPendingIO()
 			}
 
 			LOGI("session %u cancelling pending IO (count %ld)",
-				GetSessionID(), ::InterlockedCompareExchange(&m_ioCount, 0, 0));
+				GetSessionID(), ::ReadAcquire(&m_ioCount));
 
 			if (!::CancelIoEx(reinterpret_cast<HANDLE>(m_clientSocket), nullptr))
 			{
@@ -255,7 +259,7 @@ bool BaseSession::CancelPendingIO()
 					//
 					// 카운트가 0 일 때만 세운다. 0 이 아니면 남은 완료 통지가 도착해
 					// DecrementIO 가 0 으로 내릴 때 그쪽에서 이벤트를 세운다.
-					const LONG outstanding = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
+					const LONG outstanding = ::ReadAcquire(&m_ioCount);
 
 					if (outstanding == 0)
 					{
@@ -322,7 +326,7 @@ bool BaseSession::WaitForIOCancelComplete(const uint32_t timeout_ms)
 	// 기다리는 목적은 "미완료 I/O 가 없는 상태" 하나다. 이벤트는 그걸
 	// 알리는 수단일 뿐이므로, 이미 0 이면 이벤트를 보지 않고 통과한다.
 	// 신호를 놓쳤더라도 여기서 걸러진다.
-	if (::InterlockedCompareExchange(&m_ioCount, 0, 0) == 0)
+	if (::ReadAcquire(&m_ioCount) == 0)
 	{
 		return true;
 	}
@@ -373,7 +377,7 @@ bool BaseSession::WaitForIOCancelComplete(const uint32_t timeout_ms)
 		}
 
 		// 신호를 놓쳤을 수도 있으니 목적을 직접 확인한다.
-		if (::InterlockedCompareExchange(&m_ioCount, 0, 0) == 0)
+		if (::ReadAcquire(&m_ioCount) == 0)
 		{
 			LOGW("session %u IO cancel event was missed but the count is zero", GetSessionID());
 			return true;
@@ -387,7 +391,7 @@ bool BaseSession::WaitForIOCancelComplete(const uint32_t timeout_ms)
 		ReissueCancelIo();
 	}
 
-	const LONG outstanding = ::InterlockedCompareExchange(&m_ioCount, 0, 0);
+	const LONG outstanding = ::ReadAcquire(&m_ioCount);
 
 	if (outstanding == 0)
 	{
@@ -404,8 +408,7 @@ bool BaseSession::WaitForIOCancelComplete(const uint32_t timeout_ms)
 
 bool BaseSession::IsIOCancelRequested() const
 {
-	return (::InterlockedCompareExchange(
-		const_cast<volatile LONG*>(&m_cancelIo), 0, 0) == 1);
+	return (::ReadAcquire(&m_cancelIo) == 1);
 }
 
 bool BaseSession::BeginIO()
@@ -414,7 +417,7 @@ bool BaseSession::BeginIO()
 	// 이 카운트가 곧 "대기가 통과하지 못하게 하는 장벽" 이다.
 	::InterlockedIncrement(&m_ioCount);
 
-	if (::InterlockedCompareExchange(&m_cancelIo, 0, 0) == 0)
+	if (::ReadAcquire(&m_cancelIo) == 0)
 	{
 		return true;
 	}

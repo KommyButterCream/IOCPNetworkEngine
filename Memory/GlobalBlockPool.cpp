@@ -242,7 +242,7 @@ namespace MemoryPoolDetail
 		// 부담이 없고, 이 값이 풀 크기를 정하는 유일한 근거다.
 		for (;;)
 		{
-			const LONG64 current = ::InterlockedCompareExchange64(&target.minBlocksInPool, 0, 0);
+			const LONG64 current = ::ReadAcquire64(&target.minBlocksInPool);
 			if (remaining >= current)
 				break;
 			if (::InterlockedCompareExchange64(&target.minBlocksInPool, remaining, current) == current)
@@ -345,14 +345,12 @@ namespace MemoryPoolDetail
 
 	uint64_t GlobalBlockPool::GetCommittedBytes() const
 	{
-		return static_cast<uint64_t>(::InterlockedCompareExchange64(
-			const_cast<volatile LONG64*>(&m_committedBytes), 0, 0));
+		return static_cast<uint64_t>(::ReadAcquire64(&m_committedBytes));
 	}
 
 	uint64_t GlobalBlockPool::GetCommitLimitHitCount() const
 	{
-		return static_cast<uint64_t>(::InterlockedCompareExchange64(
-			const_cast<volatile LONG64*>(&m_commitLimitHits), 0, 0));
+		return static_cast<uint64_t>(::ReadAcquire64(&m_commitLimitHits));
 	}
 
 	bool GlobalBlockPool::GrowLocked(uint32_t bin, uint32_t minBlocks, bool isInitial)
@@ -375,7 +373,7 @@ namespace MemoryPoolDetail
 		if (!isInitial && m_maxCommittedBytes != 0)
 		{
 			const uint64_t committed = static_cast<uint64_t>(
-				::InterlockedCompareExchange64(&m_committedBytes, 0, 0));
+				::ReadAcquire64(&m_committedBytes));
 
 			if (committed + bytes > m_maxCommittedBytes)
 			{
@@ -423,7 +421,7 @@ namespace MemoryPoolDetail
 			::InterlockedIncrement(&target.growthCount);
 			LOGW("bin %u (block size %u) grew at runtime : +%u blocks, %lld total",
 				bin, spec.blockSize, blocks,
-				::InterlockedCompareExchange64(&target.blocksCreated, 0, 0));
+				::ReadAcquire64(&target.blocksCreated));
 		}
 
 		return true;
@@ -438,20 +436,20 @@ namespace MemoryPoolDetail
 
 		out = BinStats{};
 		out.blocksCreated = static_cast<uint32_t>(
-			::InterlockedCompareExchange64(&target.blocksCreated, 0, 0));
+			::ReadAcquire64(&target.blocksCreated));
 		out.blocksInPool = static_cast<uint32_t>(
-			::InterlockedCompareExchange64(&target.blocksInPool, 0, 0));
+			::ReadAcquire64(&target.blocksInPool));
 		out.growthCount = static_cast<uint32_t>(
-			::InterlockedCompareExchange(&target.growthCount, 0, 0));
+			::ReadAcquire(&target.growthCount));
 		out.failCount = static_cast<uint32_t>(
-			::InterlockedCompareExchange(&target.failCount, 0, 0));
+			::ReadAcquire(&target.failCount));
 		out.segmentCount = target.segmentCount;
 		out.committedBytes = static_cast<uint64_t>(
-			::InterlockedCompareExchange64(&target.committedBytes, 0, 0));
+			::ReadAcquire64(&target.committedBytes));
 
 		// 재고가 가장 적었던 순간에 밖에 나가 있던 블록 수.
 		// 그중 일부는 스레드 캐시에 놀고 있었을 수 있으므로 상한이다.
-		const LONG64 minInPool = ::InterlockedCompareExchange64(&target.minBlocksInPool, 0, 0);
+		const LONG64 minInPool = ::ReadAcquire64(&target.minBlocksInPool);
 		out.peakOutOfPool = (minInPool >= 0 && minInPool <= static_cast<LONG64>(out.blocksCreated))
 			? static_cast<uint32_t>(static_cast<LONG64>(out.blocksCreated) - minInPool)
 			: 0;

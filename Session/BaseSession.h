@@ -123,8 +123,7 @@ public:
 	}
 	ClientSessionState GetClientSessionState() const
 	{
-		return static_cast<ClientSessionState>(::InterlockedCompareExchange(
-			const_cast<volatile LONG*>(&m_clientSessionState), 0, 0));
+		return static_cast<ClientSessionState>(::ReadAcquire(&m_clientSessionState));
 	}
 
 	void SetServerSessionState(ServerSessionState sessionState)
@@ -133,8 +132,7 @@ public:
 	}
 	ServerSessionState GetServerSessionState() const
 	{
-		return static_cast<ServerSessionState>(::InterlockedCompareExchange(
-			const_cast<volatile LONG*>(&m_serverSessionState), 0, 0));
+		return static_cast<ServerSessionState>(::ReadAcquire(&m_serverSessionState));
 	}
 
 	void SetAcceptSessionState(AcceptSessionState sessionState)
@@ -143,8 +141,7 @@ public:
 	}
 	AcceptSessionState GetAcceptSessionState() const
 	{
-		return static_cast<AcceptSessionState>(::InterlockedCompareExchange(
-			const_cast<volatile LONG*>(&m_acceptSessionState), 0, 0));
+		return static_cast<AcceptSessionState>(::ReadAcquire(&m_acceptSessionState));
 	}
 
 	// --- 타입 및 식별자 ---
@@ -170,8 +167,7 @@ public:
 
 	DisconnectReason GetDisconnectReason() const
 	{
-		return static_cast<DisconnectReason>(::InterlockedCompareExchange(
-			const_cast<volatile LONG*>(&m_disconnectReason), 0, 0));
+		return static_cast<DisconnectReason>(::ReadAcquire(&m_disconnectReason));
 	}
 
 	// 세션을 재사용하기 전에 되돌린다. 남아 있으면 다음 접속의 종료가

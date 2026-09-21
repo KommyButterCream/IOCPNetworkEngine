@@ -36,7 +36,7 @@ namespace MemoryPoolDetail
 		{
 			for (;;)
 			{
-				const LONG64 current = ::InterlockedCompareExchange64(&g_slotMask, 0, 0);
+				const LONG64 current = ::ReadAcquire64(&g_slotMask);
 
 				uint32_t slot = ThreadCacheRegistry::MAX_FAST_SLOTS;
 				for (uint32_t i = 0; i < ThreadCacheRegistry::MAX_FAST_SLOTS; ++i)
@@ -64,7 +64,7 @@ namespace MemoryPoolDetail
 
 			for (;;)
 			{
-				const LONG64 current = ::InterlockedCompareExchange64(&g_slotMask, 0, 0);
+				const LONG64 current = ::ReadAcquire64(&g_slotMask);
 				const LONG64 desired = current & ~(1LL << slot);
 				if (::InterlockedCompareExchange64(&g_slotMask, desired, current) == current)
 					return;

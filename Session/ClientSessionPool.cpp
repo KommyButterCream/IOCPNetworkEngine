@@ -243,8 +243,7 @@ uint32_t ClientSessionPool::GetInUseCount() const
 		// poolState 는 Interlocked 로만 전이하므로 원자적으로 읽으면 된다.
 		// 세는 도중에 값이 바뀔 수 있어 결과는 근사치다. 접속 수용 판단은
 		// 어차피 다음 순간에 또 달라지므로 근사치로 충분하다.
-		if (::InterlockedCompareExchange(
-			const_cast<volatile LONG*>(&m_nodes[i].poolState), 0, 0) != SESSION_POOL_FREE)
+		if (::ReadAcquire(&m_nodes[i].poolState) != SESSION_POOL_FREE)
 		{
 			++count;
 		}
@@ -262,8 +261,7 @@ uint32_t ClientSessionPool::CountSessionsFromAddress(const char* ipAddress) cons
 
 	for (uint32_t i = 0; i < m_capacity; ++i)
 	{
-		if (::InterlockedCompareExchange(
-			const_cast<volatile LONG*>(&m_nodes[i].poolState), 0, 0) == SESSION_POOL_FREE)
+		if (::ReadAcquire(&m_nodes[i].poolState) == SESSION_POOL_FREE)
 		{
 			continue;
 		}

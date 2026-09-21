@@ -175,8 +175,8 @@ void TlsMemoryPool::Finalize()
 		totalRelease += release;
 	}
 
-	const LONG64 bypassAcquire = ::InterlockedCompareExchange64(&m_bypassAcquire, 0, 0);
-	const LONG64 bypassRelease = ::InterlockedCompareExchange64(&m_bypassRelease, 0, 0);
+	const LONG64 bypassAcquire = ::ReadAcquire64(&m_bypassAcquire);
+	const LONG64 bypassRelease = ::ReadAcquire64(&m_bypassRelease);
 
 	const bool blocksStillOut = (totalAcquire != totalRelease) || (bypassAcquire != bypassRelease);
 
@@ -458,10 +458,10 @@ void TlsMemoryPool::LogStats(const char* poolName) const
 			stats.segmentCount, committed, marker);
 	}
 
-	const LONG64 bypassAcquire = ::InterlockedCompareExchange64(&m_bypassAcquire, 0, 0);
+	const LONG64 bypassAcquire = ::ReadAcquire64(&m_bypassAcquire);
 	if (bypassAcquire != 0)
 	{
-		const LONG64 bypassRelease = ::InterlockedCompareExchange64(&m_bypassRelease, 0, 0);
+		const LONG64 bypassRelease = ::ReadAcquire64(&m_bypassRelease);
 		LOGI("[%s] pool %u bypass (over the largest bin) : acquire %lld  release %lld  live %lld",
 			name, ownerTag, bypassAcquire, bypassRelease, bypassAcquire - bypassRelease);
 	}
